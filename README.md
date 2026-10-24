@@ -25,9 +25,9 @@ This is experimental work on one unit. Hardware revisions and firmware versions 
 - **managed NAND:** CSNP1GCR01-B0W, SD protocol, connected through SDC0/PF0..PF5
 - **display:** 1024x600 RGB565
 - **touch:** Goodix GT911
-- **unmarked 8-pin device near FPGA:** exact type and purpose unconfirmed
+- **unmarked 8-pin device near FPGA:** very likely a Sinormous SMEC88SP secure ("encryption") IC on I2C, identified by pinout, firmware self-test label and vendor datasheet rather than by chip marking; see [docs/hardware.md](docs/hardware.md)
 
-The former W25N512GV identification was based on interpreting `EF 40 15` as SPI-NAND output. Hardware and firmware tests show that this is the W25Q16JV NOR ID. The unmarked device must therefore remain unidentified until direct evidence is available.
+The former W25N512GV identification was based on interpreting `EF 40 15` as SPI-NAND output. Hardware and firmware tests show that this is the W25Q16JV NOR ID. The unmarked device is therefore not SPI NAND; the evidence for its actual identity, and what is still open, is collected in `docs/hardware.md`.
 
 ## Quick start: custom boot logo
 

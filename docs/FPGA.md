@@ -86,27 +86,29 @@ An MS5351M with a 25 MHz reference has been identified near the FPGA subsystem. 
 
 The former W25N512GV claim is withdrawn. `EF 40 15` belongs to the W25Q16JV NOR, and no independent SPI-NAND read-ID has confirmed a W25N512GV.
 
-Runtime captures on the nearby four-pin header show two-wire, I2C-like traffic, including address-0 decoding and short repeated transfers. Power-on timing appears less conventional. A similar FNIRSI design has been reported to proxy an external device through the FPGA, but applying that architecture to the DPOS350P remains a hypothesis.
+The device is very likely a Sinormous SMEC88SP secure (encryption) IC; the evidence (pin measurements, firmware self-test label, vendor datasheet match) and the bus measurements are collected in [hardware.md](hardware.md). In short:
 
-Unconfirmed questions:
+- the two-wire link on the nearby four-pin header is I2C-style, about 2 MHz, with a slave address byte of `00` (write) / `01` (read)
+- the FPGA is the bus master (the CPU has no GPIO path to these lines and reaches the device only through FPGA registers)
+- the stock firmware's boot self-test lists an "encryption chip check" and stops if it fails
+- the traffic shows a fixed 2.35 s fast phase after power-up and then a steady 2.79 ms write/read cadence, independent of UI button presses
 
-- Is the FPGA the master of the two-wire bus?
-- Is the protocol valid I2C or only I2C-like?
-- Is the device memory, a small MCU, calibration storage or an authentication component?
-- Does `SMEC_Init()` trigger or consume the traffic?
-- Is the FPGA configuration stored internally?
+Answers to the earlier questions:
+
+- Is the FPGA the master of the two-wire bus? Yes, as far as the firmware shows.
+- Is the protocol valid I2C or only I2C-like? I2C-style framing, but a proprietary command layer on top of it; the exchanged values are produced by the device's own program and are not documented.
+- Is the device memory, a small MCU, calibration storage or an authentication component? Per firmware label and vendor description: a programmable secure IC used for a boot-time check, not a memory or the FPGA configuration store.
+- Is the FPGA configuration stored internally? Most likely yes (non-volatile GW1N).
+
+Open: what the device's program computes, and whether the FPGA depends on it once running.
 
 ## SMEC
 
-The FPGA project contains `smec.v`, and EXE2 calls `SMEC_Init()` after FAT/UI setup but before power, horizontal, vertical and generator initialization. No expansion of the acronym or functional meaning is currently justified.
+The FPGA project contains `smec.v`, and EXE2 calls `SMEC_Init()` after FAT/UI setup but before power, horizontal, vertical and generator initialization.
 
-Next analysis must inspect `SMEC_Init @ 0x4004A15C` for:
+"SMEC" matches the product family name of the 8-pin device (SMEC88) and is not a string found in the firmware, so it is best read as a label for the FPGA-side logic that handles that device. `SMEC_Init` and the surrounding start-up code use the known FPGA register primitives and a retry loop; the boot self-test then performs the "encryption chip check" described in [hardware.md](hardware.md).
 
-- callers and callees
-- use of the known FPGA read/write primitives
-- fixed command bytes
-- eight-byte loops or buffers
-- retries, timeouts and comparisons
+Not documented here on purpose: command encodings and exchanged values. What the device's program computes is the product vendor's own design.
 
 ## Functional hypotheses
 
@@ -121,7 +123,7 @@ The following are reasonable search guides, not established mappings:
 
 1. fully reconstruct `FPGA_Start()` and its clock-related helpers
 2. reproduce the complete function in an isolated Custom App
-3. disassemble `SMEC_Init()` and correlate commands with logic-analyzer captures
+3. `SMEC_Init()` has been disassembled and its start-up role correlated with 50 MS/s captures (see hardware.md)
 4. map callers of the three low-level FPGA primitives
 5. build a read-only register/status map before attempting acquisition control
 6. analyze `HorizontalInit`, `VerticalInit` and `Gen_Init` only after shared primitives are named
