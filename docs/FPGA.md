@@ -261,6 +261,43 @@ The reported hardware differences currently look like revision/package/vendor di
 5. Treat FPGA command `0x02` charging status and command `0x03` power-off as local verification targets.
 6. Treat the absence of a discovered SoC-side bitstream as evidence, not proof of the FPGA configuration source.
 
+### Independent secure-device cross-check
+
+Independent hardware work by Marco Menti (`mmame`) strongly identifies the
+unmarked SOP-8 device near the FPGA as a Sinormous SMEC88SP-class
+programmable secure IC.
+
+The supporting physical evidence is documented in [hardware.md](hardware.md)
+and includes:
+
+- an SOP-8 pinout closely matching the reported SMEC88SP pinout;
+- SDA/SCL with 3.3 kOhm pull-ups on the nearby four-pin header;
+- I2C-style traffic at approximately 2 MHz;
+- an approximately 2.35 s fast startup phase;
+- steady write/read traffic at approximately 2.79 ms cadence;
+- the stock POST label `加密芯片检测 ...` ("encryption chip check").
+
+The literal string `SMEC` has not been identified in the stock firmware or
+SPI flash. The historical project name `SMEC_Init` and related terminology
+must therefore not be treated as a stock firmware symbol for the physical
+device.
+
+Local DPOSDBG runtime tracing independently establishes the ARM-visible side
+of this subsystem:
+
+```text
+ARM/R11
+    |
+    | selectors 0x64..0x6B
+    | command/input/status/result protocol
+    v
+GOWIN FPGA
+    |
+    | probable two-wire service link
+    v
+SMEC88SP-class secure-device candidate
+```
+
 # Preserved canonical reverse-engineering record
 
 ## FPGA state before original EXE2

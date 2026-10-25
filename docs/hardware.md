@@ -43,20 +43,21 @@ This document separates confirmed findings from open hypotheses.
 
 The previous identification as a Winbond W25N512GV SPI NAND containing the FPGA bitstream is withdrawn. Current evidence instead makes a programmable secure IC in the Sinormous SMEC88 family, specifically an SMEC88SP-class SOP-8 device, the strongest identification candidate. The package has no readable marking, so this remains an evidence-based identification rather than a marking-based confirmation.
 
-### Evidence from one measured unit
+### Evidence 1: pinout
 
-SOP-8 pin measurements reported by Marco Menti (`mmame`) on one unit:
+Measured by Marco Menti (`mmame`) on one unit, SOP-8, pin 1 at the package dot:
 
-```text
-pin 1   floating / NC-like
-pin 2   floating / NC-like
-pin 3   steady about 3.0 V
-pin 4   GND
-pin 5   two-wire signal with 3.3 kOhm pull-up to VCC
-pin 6   two-wire signal with 3.3 kOhm pull-up to VCC
-pin 7   steady about 3.0 V
-pin 8   about 3.1 V VCC
-```
+| Pin | SMEC88SP per vendor information | Measured |
+|---|---|---|
+| 1, 2 | NC (float, or tie to VCC/GND) | floating; about 40 mV and drifting when probed with a DMM while powered |
+| 3 | NC | steady about 3.0 V while powered; diode mode 1.4 V / 0.52 V to GND |
+| 4 | GND | GND; continuity to ground/shield |
+| 5 | SDA | 3.3 kOhm pull-up to VCC; available on the nearby four-pin header |
+| 6 | SCL | 3.3 kOhm pull-up to VCC; available on the nearby four-pin header |
+| 7 | RST, active low; may float or go to VCC, must not go to GND | steady about 3.0 V while powered; diode mode 0.9 V / 0.52 V to GND |
+| 8 | VCC, 1.62 V to 5.5 V | about 3.1 V |
+
+The nearby four-pin header carries the two signal lines plus VCC and GND associated with this device. Pins 3 and 7 were reported tied high through resistor paths rather than directly to VCC or GND.
 
 This closely matches the reported SMEC88SP SOP-8 assignment:
 
@@ -69,23 +70,75 @@ This closely matches the reported SMEC88SP SOP-8 assignment:
 8     VCC
 ```
 
-Because the package marking is unreadable, keep this as **strong identification by pinout/electrical evidence**, not an absolute part-number confirmation.
+Because the package marking itself is unreadable, this remains a strong identification by electrical/pinout evidence, not an absolute marking-based part-number confirmation.
 
-### Two-wire bus observations
+### Evidence 2: firmware
 
-Logic-analyzer observations on the nearby four-pin header report:
+The stock EXE2 power-on self-test contains the labels:
 
 ```text
-sample rate used successfully   50 MS/s
+FPGA检测 ...
+加密芯片检测 ...
+```
+
+corresponding to an FPGA check followed by an "encryption chip check". Additional ADC, channel-multiplexing, range, DC/AC, bandwidth-limit and flatness checks follow. The reported behavior is that failure of the encryption-chip check is displayed and the firmware stops.
+
+The literal string `SMEC` has not been identified in the stock firmware or SPI flash. The historical project terminology `SMEC_Init` comes from reverse-engineering labelling and the `smec.v` FPGA project filename visible in developer material.
+
+The CPU's independently identified software two-wire buses serve the GT911 and MS5351M. Secure-device-related ARM code instead accesses the subsystem through the FPGA parallel-register interface.
+
+Together with the runtime evidence below, this strongly supports an FPGA-mediated link to the external secure-device candidate.
+
+### Evidence 3: SMEC88 vendor information
+
+The Sinormous SMEC88 product information describes the SMEC88SP/SMEC88ST family as customer-programmable secure devices.
+
+Reported properties include:
+
+- SOP-8 SMEC88SP and SOT23-6 SMEC88ST packages
+- two-wire/I2C interface
+- hardware support up to approximately 3.4 Mbit/s
+- customer-defined program downloaded into the device
+- command/result exchanges with the host
+- program/data protection and memory-encryption features
+- tamper-related protection mechanisms
+- a reset pin which may float or be pulled to VCC but must not be tied to GND
+
+The measured electrical pinout above closely matches the reported SMEC88SP SOP-8 pinout.
+
+Because the package marking itself cannot be read, the identification remains evidence-based rather than marking-confirmed.
+
+### Two-wire bus observations
+ 
+DSLogic Plus captures on the nearby four-pin header report:
+ 
+```text
+sample rate used successfully    50 MS/s
 logic threshold                  1 V
-SCL low                          about 160 ns
+SCL low about                    160 ns
 SCL high                         about 330 ns
 clock                            about 2 MHz
 startup fast phase               about 2.35 s
 steady transaction cadence       about 2.79 ms
+steady pair rate                 about 358 pairs/s
+reported payload                 7 data bytes/frame
 ```
 
-Framing is I2C-style. Captures decode an initial byte `0x00` for write-like phases and `0x01` for read-like phases. This resembles a 7-bit address zero plus the R/W bit, but the exact protocol and command layer remain unresolved. Sampling at 2 or 12 MS/s was reported too slow for reliable decoding. Vertical/horizontal scale-button changes did not add or delay the observed steady frames in the reported test.
+Observed characteristics:
+
+- both signal lines idle high
+- SDA changes while SCL is low
+- I2C-style START and byte/ACK framing is visible
+- frames begin with 0x00 for write-like phases or 0x01 for read-like phases
+- this is consistent with a 7-bit address value of zero plus the R/W bit, although the exact command-layer semantics remain unresolved
+- after power-up there is a deterministic fast phase lasting approximately 2.35 seconds
+- steady operation then produces write/read pairs approximately every 2.79 ms
+- the timing was reported identical across multiple power-ups
+- frame data changes between individual exchanges and differs between power-ups
+- vertical and horizontal scale-button changes did not add or delay observed frames
+- 2 MS/s and 12 MS/s were insufficient for reliable decoding
+- 20 MS/s resolved clock edges, while 50 MS/s provided comfortable timing resolution
+- the relatively slow edges are consistent with the measured 3.3 kOhm pull-ups
 
 ### Firmware/runtime correlation
 
@@ -115,15 +168,25 @@ The FPGA-master statement remains a strong inference from the firmware/runtime a
 
 ### Safety note
 
-The secure-device vendor documentation reportedly describes tamper and program/data-protection behavior. Do not short, glitch or experimentally force the reset-related pin. Prefer passive logic-analyzer observation and ARM-to-FPGA DPOSDBG tracing.
+The secure-device vendor information describes tamper and program/data-protection behavior.
+
+- probe the two-wire signal pins passively
+- do not tie the reset-related pin to GND
+- do not deliberately short pins
+- do not apply abnormal voltage, clock or glitch conditions
+- prefer passive logic-analyzer capture and ARM-to-FPGA DPOSDBG tracing
+
+The device may contain customer-specific program material which cannot be reconstructed from public vendor documentation.
 
 ### Still open
 
 - definitive marking-based part identification
-- exact FPGA-to-device packet/command encoding
-- exact relation between ARM-visible `0x64..0x6B` transactions and physical bus frames
-- what customer program/algorithm the device performs
-- whether successful service transactions directly gate CSI acquisition
+- exact physical packet/command encoding on the FPGA-to-device two-wire bus
+- exact relationship between ARM-visible `0x64..0x6B` transactions and physical two-wire frames
+- what the customer-defined program inside the secure device computes
+- how the changing transaction inputs and returned values are generated and consumed
+- whether successful service transactions are a hard gate for CSI acquisition or indirectly related
+- whether every DPOS350P hardware revision uses the same secure device
 
 ## Local Winbond-compatible NOR map
 
@@ -159,7 +222,7 @@ For the externally reported `GW1N-LV9EQ176C6/I5` revision, package-specific GOWI
 
 ### Four-pin header near FPGA
 
-Not UART. Current captures show a roughly 2 MHz two-wire I2C-style bus during normal operation, with a deterministic startup phase and steady approximately 2.79 ms transaction cadence. See the unmarked-device / SMEC88SP-candidate section above.
+Not UART. The header carries the two signal lines plus VCC/GND associated with the unmarked 8-pin SMEC88SP candidate. Captures show I2C-style activity at about 2 MHz, with a deterministic startup phase and a steady approximately 2.79 ms transaction cadence during normal operation. See the unmarked-device section above.
 
 ## Original EXE2 startup flow
 
