@@ -329,6 +329,11 @@ These account for the missing `0x6A` byte, final `0x6B` byte, second `0x69` byte
 
 Complete jobs currently also carry the diagnostic `UNEXPECTED` flag. This does **not** indicate missing payload: all 50 complete jobs satisfy the exact `2/1/4/4` byte-count invariant, with no overflow, dropped records, or ring wrap. The specific newly covered operation that triggers `UNEXPECTED` remains **OPEN**.
 
+The same exact `2/1/4/4` payload-count invariant was subsequently
+confirmed for runtime waveform-drag jobs, demonstrating that this
+framing is not specific to the startup sequence.
+
+
 ### 6.4 State propagation
 
 **HW-CONFIRMED:** In the observed sequences:
@@ -470,6 +475,18 @@ The earlier 111-record trace is explained by the same structure:
 60 / 5 = 12 UI-update blocks
 ```
 
+A later DPOSDBG v4.1 re-trace with complete four-byte payload coverage
+produced:
+
+```text
+261 total records
+51 startup records
+210 waveform-drag jobs
+42 complete five-job UI-update blocks
+```
+
+All 210 runtime jobs retained the exact 2/1/4/4 payload-count invariant and the trace completed with wrapped=0 and dropped=0.
+
 The earlier trace was created while touch behavior was being tested.
 
 ### 8.2 Five-job state cycle
@@ -501,13 +518,68 @@ block starts normally advance the stock main-loop run_count by one
 
 This corresponds to approximately 16.7 update blocks per second and is consistent with touch/UI update cadence.
 
-### 8.4 Input values require v4.1 re-trace
+### 8.4 Waveform-drag input values
 
-The earlier v3 waveform-drag trace reported `0x6B` values as `1, 0, 1, 1, 0` from only the first three captured bytes. Because v4.1 proves that `0x6B` is actually four bytes wide, those values are now **STALE / NEED RE-TRACE** and must not be used as complete job parameters.
+**HW-CONFIRMED:** DPOSDBG v4.1 confirmed the full four-byte `0x6B`
+values during vertical waveform dragging.
 
-The five-job state cycle and UI causality remain **HW-CONFIRMED**. The full four-byte `0x6B` input values for waveform drag must be captured again with DPOSDBG v4.1 before assigning semantics.
+Each UI update produces the previously identified five-job state cycle:
 
----
+```text
+B9 -> 0D    X
+0D -> B5    0
+B5 -> 0F    X
+0F -> 11    X
+11 -> B9    0
+```
+
+where `X` is the same 32-bit big-endian `0x6B` value in jobs 1, 3, and 4 of the block.
+
+During one upward movement, observed values increased monotonically:
+
+```text
+0x00FC = 252
+0x011B = 283
+0x0141 = 321
+0x0147 = 327
+0x0150 = 336
+0x015D = 349
+0x016A = 362
+0x0172 = 370
+0x0177 = 375
+0x017A = 378
+0x017C = 380
+0x017E = 382
+```
+
+During the reverse movement, the values decreased:
+
+```text
+0x017A = 378
+0x0171 = 369
+0x0160 = 352
+0x0155 = 341
+...
+0x0105 = 261
+0x0104 = 260
+0x0103 = 259
+0x0101 = 257
+0x0100 = 256
+0x00FF = 255
+0x00FE = 254
+0x00FD = 253
+```
+
+The variable X therefore tracks vertical waveform movement monotonically.
+
+The exact coordinate system, scale, offset, and whether X is the direct waveform position or a derived FPGA parameter remain **OPEN**.
+
+The earlier v3 observation 1, 0, 1, 1, 0 is superseded by this result. It represented the incomplete three-byte view of the same pattern:
+
+Plain Text
+X, 0, X, X, 0
+
+**HW-CONFIRMED:** During continuous dragging, one five-job block is normally generated approximately every 60 ms and correlates with one increment of the stock main-loop run_count.
 
 ## 9. What the job protocol is and is not
 
