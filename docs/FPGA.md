@@ -110,7 +110,7 @@ SEL   0x66
 READ  <four bytes>
 ```
 
-The transaction repeats with changing input and return values. Therefore the ARM software continuously participates in the FPGA-side service protocol; reproducing only the FPGA ID transaction is insufficient evidence of acquisition-ready state.
+The transaction repeats with changing input and return values. Therefore the ARM software continuously participates in an FPGA-side asynchronous job/service protocol; reproducing only the FPGA ID transaction is insufficient evidence of the complete operational state.
 
 **HW-CONFIRMED polling:** the path at `0x4004A04C/0x4004A050` repeatedly selects `0x65` and reads until bit 0 becomes set. DPOSDBG event `0x1010` (`POLL65_DONE`) compresses this loop into the final value and the count of preceding unsuccessful reads. Many observed transactions require about 3000 reads; one captured example completed after 3070 bit-clear reads with final value `0x01`. Other final values include `0x03`, `0x05`, `0x07` and `0x17`, so the returned byte carries state beyond the confirmed ready bit.
 
@@ -155,7 +155,7 @@ The externally cross-checked MS5351M path on PE20/PE21 remains separate from the
 
 #### Consequence for standalone Custom App acquisition
 
-The previous isolated Custom App proved FPGA bus access, FPGA ID and local CSI setup, but did not complete acquisition. Runtime tracing now identifies a concrete missing subsystem: broader FPGA state initialization plus repeating `0x64..0x6B` service transactions.
+The previous isolated Custom App proved FPGA bus access, FPGA ID and local CSI setup, but did not complete acquisition. Runtime tracing now identifies a concrete missing subsystem: broader FPGA state initialization plus repeating `0x64..0x6B` asynchronous job/service transactions. The exact relationship of that protocol to acquisition remains under active test.
 
 This is a leading explanation for the failed acquisition experiment, but a causal dependency on CSI waveform emission still requires an active hardware test.
 
@@ -172,7 +172,7 @@ byte returned through 0x67
 32-bit value returned through 0x66
 ```
 
-Then identify the producer/state relationship of the changing `0x6B` input, reconstruct the minimum repeating FPGA-service loop, implement it in the standalone Custom App, and only then repeat the single-bank CSI smoke test.
+Then identify the producer/state relationship of the changing `0x6B` input and compare transactions across normal, stopped, FFT and FRA modes. Only after the protocol's role and any acquisition dependency are established should a minimum required job/service sequence be reproduced in the standalone Custom App and the single-bank CSI smoke test repeated.
 
 Priority static region:
 
@@ -297,6 +297,161 @@ GOWIN FPGA
     v
 SMEC88SP-class secure-device candidate
 ```
+
+### Independent runtime/acquisition cross-check (2026-10-25)
+
+A separate DPOS350P reverse-engineering effort by Adam Ivie (`Line-of-Sight-Services/FNIRSI-DPOS350P-RemoteControl`) independently reconstructs the same FPGA control primitives and has verified raw acquisition-ring readout on physical hardware. The source repository is private because it also contains per-unit firmware/calibration material; only the technical findings summarized here are incorporated.
+
+#### EXTERNAL HW-CONFIRMED: CSI active payload and channel grouping
+
+On the 2025-06-19 build, the external project uses the same locally known CSI/ring addresses:
+
+```text
+CSI base       0x01CB4000
+CSI BUF0       0x01CB4050
+ring base      0x42DF76D4
+slot stride    0x2134 = 8500 bytes
+slot count     8
+active payload 0x1800 = 6144 bytes per captured slot
+```
+
+Hardware tests with a 1 kHz generator report:
+
+```text
+CH1 only:
+    slots 0..7 contain CH1 data
+
+CH1 + CH2:
+    slots 0..3 contain CH1 data
+    slots 4..7 contain CH2 data
+```
+
+Each active slot contains 6144 raw 8-bit samples. Different slots exhibit different zero-code offsets; an observed example included values around `166/162/151/151`. This is consistent with multiple ADC/interleave cores requiring per-slot calibration, but the exact ADC-core ordering and fast-timebase interleave order remain open.
+
+This resolves two previous practical unknowns for at least the externally tested acquisition modes:
+
+- the active sample payload is 6144 bytes inside each 8500-byte logical slot;
+- bank groups `0..3` and `4..7` correspond to CH1 and CH2 respectively when both channels are enabled, while single-channel CH1 can use all eight slots.
+
+The remaining `8500 - 6144 = 2356` bytes per slot must not yet be assigned a fixed meaning; allocation, ring-origin headroom, guard space, alignment and other runtime-layout explanations remain possible.
+
+#### EXTERNAL STATIC-CONFIRMED: independent primitive-address match
+
+For local build `8eeb56ba0086`, the external symbol map independently identifies:
+
+```text
+FPGA_CMD       0x4004927C
+FPGA_WRITE     0x40049214
+FPGA_READ      0x400491B8
+FPGA_READ_RET  0x40049210
+RING           0x42DF76D4
+```
+
+These match the locally reconstructed primitive addresses and raw-ring base. Its separate factory/reference build uses the same structures at shifted addresses, including ring base `0x42DF76EC`; firmware-build context must therefore accompany absolute RAM/code addresses.
+
+#### Interpretation correction: `0x64..0x6B` is an asynchronous FPGA job/service protocol
+
+Local DPOSDBG hardware tracing proves the transaction shape and repeated runtime use of commands `0x64..0x6B`, but it does not by itself prove the backend purpose of the transaction.
+
+The independent static analysis reaches the same command family and describes its shape as:
+
+```text
+write job/parameter inputs
+start operation
+poll 0x64 / 0x65 ready state
+read status / 32-bit result
+```
+
+However, that project currently interprets the family as a possible measurement engine used by frequency/FFT/FRA-related paths. That semantic label is explicitly inferred rather than hardware-confirmed.
+
+Therefore the current neutral terminology is:
+
+```text
+0x64..0x6B = ARM-visible asynchronous FPGA job/service protocol
+```
+
+Confirmed:
+
+- ARM submits command/input state through FPGA registers;
+- completion is polled through status/ready bits;
+- a result/status value is returned;
+- the protocol is active repeatedly at runtime.
+
+Not yet established:
+
+- whether all transactions target the external secure-device subsystem;
+- whether some or all transactions implement measurement/FFT/FRA work;
+- whether this is a general FPGA job engine shared by multiple subsystems;
+- the byte-level relation between this ARM-visible protocol and the physical two-wire SMEC88SP-candidate traffic.
+
+The previous wording that treated the repeating `0x64..0x6B` activity as specifically a secure-device service loop is therefore too narrow and is superseded by this section.
+
+#### Independent runtime tracer cross-check
+
+The external project also implements an independent FPGA primitive tracer which hooks command, write and read-return primitives and records `(kind, byte, main-loop counter)` into a large DRAM ring. Its implementation includes repeated-read compression, quiet-command counters, hook validation, cache maintenance and emulator tests against both firmware builds.
+
+At the time of the supplied snapshot, that tracer is documented as emulator-tested but not yet run on the physical scope. Therefore local DPOSDBG remains the hardware-confirmed primitive tracer, while the external implementation provides useful independent design validation and a larger-ring/session methodology.
+
+A companion session tool is designed to collect idle traffic and then change one UI variable at a time, including V/div, coupling, timebase, trigger settings, generator settings, FFT and FRA screens. This provides a direct experiment for distinguishing background service traffic from measurement-mode-specific `0x64..0x6B` activity.
+
+#### Additional externally mapped FPGA controls
+
+The external static/RAM-diff work reports these useful mappings:
+
+```text
+0x02  status read; bit 0 = charging indication
+0x03  power off
+
+0x28  CH1 V/div / position apply path
+0x29  CH1 bandwidth-derived filter
+0x2B  CH2 V/div / position apply path
+0x2C  CH2 bandwidth-derived filter
+0x2F  CH1 coupling
+0x30  CH2 coupling
+
+0x10  trigger level
+0x15  trigger channel
+0x16  trigger edge
+0x1A  trigger mode
+```
+
+These mappings are valuable implementation leads but remain **EXTERNAL CROSS-CHECK** in this document until locally reproduced or independently verified against the local EXE2/hardware.
+
+#### Revised immediate experiment
+
+The next DPOSDBG transaction-level capture should answer a more neutral question than the earlier secure-service hypothesis:
+
+```text
+Is 0x64..0x6B primarily:
+    A. secure-device service,
+    B. measurement/FFT/FRA work,
+    C. or a general FPGA asynchronous job engine used by both?
+```
+
+Capture and compare at minimum:
+
+```text
+normal scope running
+normal scope stopped
+FFT screen active
+FRA screen active
+frequency/measurement-related mode where available
+startup/encryption-check interval where practical
+```
+
+For each completed transaction preserve:
+
+```text
+0x69 input/timing value
+0x6A parameter/job ID or selector
+full 0x6B input value and byte count
+0x64 status
+0x65 final value and polling count
+0x67 returned byte/status
+0x66 returned 32-bit value
+```
+
+The aggregator must not assume that `0x6B` always contains exactly three bytes; independent static analysis describes a path capable of writing up to four bytes.
 
 # Preserved canonical reverse-engineering record
 
@@ -3132,14 +3287,14 @@ Keep the original app recoverable through the boot manager.
 ### Remaining practical unknowns
 
 ```text
-1. Minimum FPGA full-state initialization and repeating `0x64..0x6B` service loop required before FPGA acquisition/CSI streaming becomes operational in the standalone Custom App.
-2. Meaning of bank groups 0..3 and 4..7.
-3. Active payload layout inside 8500 bytes.
-4. CSI quantity versus FPGA command 0x22 quantity.
-5. Electrical names of shared PE controls.
-6. Official R11 CSI field and interrupt names.
-7. Physical CH1/CH2 and bank/lane order.
-8. Minimum conversion needed for a recognizable waveform.
+1. Minimum FPGA full-state initialization required before FPGA acquisition/CSI streaming becomes operational in the standalone Custom App.
+2. Whether `0x64..0x6B` is required for acquisition, and whether it is a secure-device service, measurement engine, or general asynchronous FPGA job protocol.
+3. Exact fast-timebase interleave/ADC-core ordering across the eight slots. External hardware testing establishes CH1=`0..3`, CH2=`4..7` in dual-channel mode and CH1=`0..7` in one single-channel test.
+4. Exact meaning of the 2356 bytes outside the externally verified 6144-byte active payload within each 8500-byte logical slot.
+5. CSI active-quantity relationship to FPGA command 0x22 across acquisition modes.
+6. Electrical names of shared PE controls.
+7. Official R11 CSI field and interrupt names.
+8. Minimum calibration/conversion needed for a recognizable waveform.
 ```
 
 ### Decision
