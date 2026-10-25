@@ -238,18 +238,21 @@ This map intentionally contains only locally established commands and clearly la
 
 ### 6.1 Confirmed transaction framing
 
-**HW-CONFIRMED:** DPOSDBG reconstructed complete transactions with no unexpected or overflow events.
+**HW-CONFIRMED:** DPOSDBG v4.1 / trace format v5 closes the remaining primitive-coverage gaps. Every one of the 50 complete startup jobs has the exact payload counts `2 / 1 / 4 / 4` for `0x69 / 0x6A / 0x6B / 0x66`. Record 0 is a pre-job fragment and is intentionally incomplete.
 
 ```text
 SEL   0x69
-WRITE 0x07
+WRITE byte 0
+WRITE byte 1
 
 SEL   0x6A
+WRITE byte 0
 
 SEL   0x6B
-WRITE input byte 0
+WRITE input byte 0 (MSB)
 WRITE input byte 1
 WRITE input byte 2
+WRITE input byte 3 (LSB)
 
 SEL   0x68
 WRITE 0x01
@@ -275,9 +278,9 @@ READ  byte 3
 ### 6.2 Confirmed field behavior
 
 ```text
-0x69    one written byte; observed value is always 0x07
-0x6A    selected without a following data write in this path
-0x6B    exactly three written bytes in all observed transactions
+0x69    exactly two written bytes in every complete observed startup job
+0x6A    exactly one written byte in every complete observed startup job
+0x6B    exactly four written bytes in every complete observed startup job; assembled MSB-first as a 32-bit input value
 0x68    control/start; observed start value is 0x01
 0x64    one state/status byte before completion polling
 0x65    completion/status byte; bit 0 is the confirmed ready bit
@@ -285,9 +288,48 @@ READ  byte 3
 0x66    four reads; currently each read equals the 0x67 byte
 ```
 
-The implementation should nevertheless retain support for up to four input or result bytes because static helper paths may be width-generic.
+The earlier v3 interpretation (`0x69 = 1 byte`, `0x6A = no data`, `0x6B = 3 bytes`) was a tracer coverage artifact caused by five unpatched tail branches. DPOSDBG v4.1 patches those tail branches while preserving ARM tail-call semantics. The corrected byte counts above supersede the v3 interpretation.
 
-### 6.3 State propagation
+### 6.3 DPOSDBG v4.1 coverage validation
+
+**HW-CONFIRMED:** A clean v4.1 startup capture produced:
+
+```text
+trace format       5
+capacity           768
+written records    51
+wrapped            0
+exports            1
+dropped            0
+record size        64 bytes
+```
+
+Of the 51 records, record 0 is a startup fragment. The remaining 50 jobs are complete and all have:
+
+```text
+bytes_69           2
+bytes_6A           1
+bytes_6B           4
+bytes_66           4
+begin_call_site    0x40049FC4
+last_call_site     0x4004A0A4
+```
+
+The v4.1 Stage 2 patch map adds five previously uncovered ARM tail branches:
+
+```text
+0x40049F78
+0x40049FB4
+0x40049FD8
+0x4004A01C
+0x4004A07C
+```
+
+These account for the missing `0x6A` byte, final `0x6B` byte, second `0x69` byte, stop/control write, and one tail read. This is the reason the old three-byte payload model was incomplete.
+
+Complete jobs currently also carry the diagnostic `UNEXPECTED` flag. This does **not** indicate missing payload: all 50 complete jobs satisfy the exact `2/1/4/4` byte-count invariant, with no overflow, dropped records, or ring wrap. The specific newly covered operation that triggers `UNEXPECTED` remains **OPEN**.
+
+### 6.4 State propagation
 
 **HW-CONFIRMED:** In the observed sequences:
 
@@ -310,7 +352,7 @@ state_before + input
 state_after
 ```
 
-### 6.4 Meaning of `0x66`
+### 6.5 Meaning of `0x66`
 
 **HW-CONFIRMED:** Four stock reads are issued after selecting `0x66`, and all four bytes equal the byte returned by `0x67`.
 
@@ -369,25 +411,28 @@ Only the polling count and inter-job timing vary.
 
 This weakens a random per-boot challenge/response interpretation. A deterministic startup transform, self-test, parameter initialization, or FPGA-mediated secure-device operation remains possible.
 
-### 7.3 Notable startup inputs
+### 7.3 Corrected startup inputs
 
-Stable, non-zero three-byte inputs include:
+**HW-CONFIRMED:** DPOSDBG v4.1 confirmed that `0x6B` carries a full four-byte big-endian value. Earlier three-byte values were truncated by missing tail-branch coverage.
+
+Confirmed examples from the clean startup trace include:
 
 ```text
-0x000003
-0x000012
-0x005147
-0x005123
-0x000008
-0x000010
-0x000066
-0x454B04
-0x3ED1D1
-0x000004
-0xBF8099
+0x00000014 = 20
+0x00000040 = 64
+0x000003E8 = 1000
+0x00000064 = 100
+0x000003B6 = 950
+0x000000C8 = 200
+0x0000003C = 60
+0x0000003B = 59
+0x454B047C
+0x3ED1D1ED
+0x000004AF
+0xBF809962
 ```
 
-These should be retained as test vectors. Their semantic meanings remain **OPEN**.
+These supersede the previously documented truncated three-byte values. The integer-looking values strengthen the interpretation that `0x6B` is a numerical 32-bit job input rather than an opaque three-byte payload, but the semantic meaning of each value remains **OPEN**.
 
 ### 7.4 Startup phases by timing gaps
 
@@ -456,17 +501,11 @@ block starts normally advance the stock main-loop run_count by one
 
 This corresponds to approximately 16.7 update blocks per second and is consistent with touch/UI update cadence.
 
-### 8.4 Input pattern
+### 8.4 Input values require v4.1 re-trace
 
-During active movement, the frequently observed `0x6B` input pattern per five-job block is:
+The earlier v3 waveform-drag trace reported `0x6B` values as `1, 0, 1, 1, 0` from only the first three captured bytes. Because v4.1 proves that `0x6B` is actually four bytes wide, those values are now **STALE / NEED RE-TRACE** and must not be used as complete job parameters.
 
-```text
-1, 0, 1, 1, 0
-```
-
-At the beginning and end of a gesture, blocks containing all-zero inputs were also observed.
-
-The three-byte job input does not look like the waveform Y coordinate itself. The vertical position is likely sent through a separate FPGA setting path, while this job cycle updates derived calculations or state. This interpretation remains **INFERRED**.
+The five-job state cycle and UI causality remain **HW-CONFIRMED**. The full four-byte `0x6B` input values for waveform drag must be captured again with DPOSDBG v4.1 before assigning semantics.
 
 ---
 
@@ -477,7 +516,7 @@ The three-byte job input does not look like the waveform Y coordinate itself. Th
 - It is an ARM-visible asynchronous FPGA job/state protocol.
 - It is used during a deterministic pre-main-loop startup sequence.
 - It is also invoked by waveform UI movement.
-- It has a ready bit, variable completion latency, deterministic state transitions, and three-byte inputs in the observed path.
+- It has a ready bit, variable completion latency, deterministic state transitions, and a confirmed four-byte big-endian `0x6B` input field in complete startup jobs.
 
 ### Not confirmed
 
