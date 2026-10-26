@@ -3320,3 +3320,746 @@ FPGA-to-ARM waveform transport             95-98%
 Practical custom oscilloscope application about 78%
 Full FPGA internals/replacement            25-30%
 ```
+
+### 37. Runtime CSI destination trace and low-level MMIO confirmation (2026-10-25)
+
+This milestone extends sections 34-36 with runtime DPOSDBG evidence and instruction-level reconstruction of the complete CSI destination-address write path. It does not change the no-commit policy for the current acquisition experiment branch.
+
+#### Runtime confirmation of the logical-bank destination sequence
+
+**HW-CONFIRMED:** The v6 minimum CSI baseline trace records repeated `CSI_DESTINATION` events at call site `0x40040660`. Each observed batch walks the same eight destination addresses in order:
+
+```text
+bank 0  0x42DF76D4
+bank 1  0x42DF9808
+bank 2  0x42DFB93C
+bank 3  0x42DFDA70
+bank 4  0x42DFFBA4
+bank 5  0x42E01CD8
+bank 6  0x42E03E0C
+bank 7  0x42E05F40
+```
+
+The stride is exactly `0x2134 = 8500` bytes. The eight-entry sequence repeats as a batch during normal RUN operation. This independently confirms at runtime the bank-address formula previously recovered statically.
+
+The repeated trace form is:
+
+```text
+CSI_DESTINATION  <destination>  0x40040660  0x40040660
+```
+
+**STATIC-CONFIRMED:** `0x40040660` is not a stored buffer pointer. It is the ARM call site:
+
+```asm
+4004065c: mov r0, r5
+40040660: bl  0x40066030
+```
+
+Thus `r0` contains the runtime destination address at this call. A raw search for little-endian `0x40040660` in EXE2 correctly finds no pointer occurrence because the address identifies the `BL` instruction itself.
+
+#### Exact bank-address generator and capture wrappers
+
+**STATIC-CONFIRMED:** `0x400406C8` computes:
+
+```c
+destination = 0x42DF76D4 + bank_index * 0x2134;
+```
+
+The base literal at `0x400413B4` is exactly `0x42DF76D4`.
+
+The function sequence is structurally:
+
+```asm
+400406c8: movw   r3, #0x2134
+400406cc: ldr    r1, =0x42DF76D4
+400406d0: smulbb ip, r3, r0
+400406d4: add    r1, r1, ip
+400406d8: b      0x40040638
+```
+
+`0x400406DC` loops over indices `0..7`, while `0x400406FC` loops over indices `0..3`. The previously documented high-bank wrapper remains separate. The semantic distinction between the four-bank and eight-bank modes must still be derived from their callers/state conditions rather than inferred solely from bank count.
+
+#### Complete runtime destination path
+
+**STATIC-CONFIRMED:** The per-bank destination path is now reconstructed end to end:
+
+```text
+0x400406C8
+    destination = 0x42DF76D4 + bank * 0x2134
+        |
+        v
+0x40040638
+    preserves index and destination
+        |
+        v
+0x40040660
+    r0 = destination
+    BL 0x40066030
+        |
+        v
+0x40066030
+    forwards destination as the low word of a stack-passed 64-bit address
+        |
+        v
+0x40065A60
+    computes CSI register address
+    encodes destination as address >> 2
+        |
+        v
+0x40065894
+    generic read-modify-write helper
+        |
+        +--> 0x4006582C  read32(addr)
+        |
+        +--> 0x40065834  write32(addr, value)
+        v
+MMIO
+```
+
+At `0x40066030`, the wrapper stores `{destination, 0}` on the stack. After the callee prologue, `0x40065A60` reloads this pair using `LDRD [sp,#8]`, confirming that the low 32 bits are the physical destination and the high 32 bits are zero in this path.
+
+#### CSI destination-register addressing and encoding
+
+**STATIC-CONFIRMED:** `0x40065A60` obtains a controller/device base through the pointer table rooted at `0x42E68C50`, then computes the destination-register address as:
+
+```c
+reg = controller_base[controller]
+    + channel * 0x100
+    + buffer_index * 4
+    + 0x50;
+```
+
+For the runtime path reached from `0x40066030`, the observed indices are zero, so the effective register is:
+
+```c
+CSI_DST_REG = controller_base[0] + 0x50;
+```
+
+The physical destination is encoded as a 32-bit-word address:
+
+```c
+register_value = destination >> 2;
+```
+
+For bank 0:
+
+```text
+physical destination  0x42DF76D4
+register value         0x10B7DDB5
+```
+
+The complete observed effect is therefore:
+
+```c
+MMIO32(controller_base[0] + 0x50) = destination >> 2;
+```
+
+**IMPORTANT:** `0x42E68C50` is a RAM-resident pointer table/root used to obtain the controller base. It is not itself the CSI MMIO base. The runtime value `*(uint32_t *)0x42E68C50` remains a useful independent confirmation target. Existing external/local evidence identifying the R11 CSI block at `0x01CB4000` is retained, but this particular reconstruction derives the register address through the runtime pointer table rather than assuming that constant.
+
+#### Direct MMIO primitives
+
+**STATIC-CONFIRMED:** The low-level helpers are trivial direct memory accesses:
+
+```asm
+4006582c: ldr r0, [r0]
+40065830: bx  lr
+```
+
+Equivalent to:
+
+```c
+uint32_t read32(uint32_t addr)
+{
+    return *(volatile uint32_t *)addr;
+}
+```
+
+and:
+
+```asm
+40065834: str r1, [r0]
+40065838: bx  lr
+```
+
+Equivalent to:
+
+```c
+void write32(uint32_t addr, uint32_t value)
+{
+    *(volatile uint32_t *)addr = value;
+}
+```
+
+`0x40065894` is a generic read-modify-write helper:
+
+```c
+void reg_update_bits(uint32_t addr, uint32_t mask, uint32_t value)
+{
+    uint32_t old = read32(addr);
+    uint32_t updated = (old & ~mask) | value;
+    write32(addr, updated);
+}
+```
+
+The CSI destination path supplies `mask = 0xFFFFFFFF`, making the operation an effective full-register write of `destination >> 2`.
+
+#### Capture-completion synchronization cross-check
+
+**STATIC-CONFIRMED:** The acquisition transaction waits on the byte at:
+
+```text
+0x40545576 = 0x40544E68 + 0x70E
+```
+
+until it becomes nonzero. The tail path at `0x40066108` clears the same byte back to zero before continuing through the CSI helper layer. This is consistent with the callback/IRQ completion lifecycle documented in section 34.
+
+The observed transaction around `0x40040638` is therefore structurally:
+
+```text
+prepare/select bank
+program CSI destination
+prepare capture state
+submit/enable CSI operation
+assert FPGA/shared-PE capture state
+wait for CSI completion flag
+post-capture cleanup
+release capture state
+clear/finalize CSI completion state
+```
+
+Exact semantic names of every helper in this sequence remain intentionally conservative where not separately proven.
+
+#### Evidence boundary and implementation consequence
+
+The following are now **CONFIRMED** locally by combined static analysis and runtime trace:
+
+- the eight raw destinations are generated by `base + bank * 0x2134`;
+- the runtime trace observes those exact destinations at `0x40040660`;
+- stock firmware retargets the same CSI hardware destination register between logical-bank captures;
+- destination addresses are written to hardware as `physical_address >> 2`;
+- `0x4006582C` and `0x40065834` are direct 32-bit read/write primitives;
+- `0x40065894` is the read-modify-write helper used by the CSI register layer.
+
+Still **OPEN / not to be overnamed**:
+
+- the official vendor field name for CSI offset `+0x50` in the exact R11 documentation;
+- the runtime contents of `*(uint32_t *)0x42E68C50` as an independent confirmation of the controller base;
+- the semantic distinction selecting the four-bank, high-four-bank and eight-bank wrappers;
+- the exact relationship between configured CSI active quantity and the externally observed 6144-byte active sample payload;
+- the minimum FPGA/service initialization needed to make the same capture sequence succeed in the standalone Custom App.
+
+#### Immediate implementation relevance
+
+For a later standalone acquisition implementation, programming CSI destination buffer 0 must use the encoded word address, not the byte address:
+
+```c
+uint32_t dst = RAW_ACQ_BASE + bank * RAW_BANK_STRIDE;
+MMIO32(CSI_BASE + 0x50) = dst >> 2;
+```
+
+Writing `0x42DF76D4` directly to the destination register would therefore be incorrect for bank 0; the stock encoding is `0x10B7DDB5`.
+
+This milestone strengthens the section-36 implementation baseline but does not yet justify committing an acquisition implementation. The current strategy remains to keep accumulating confirmed pieces until a minimal acquisition path works end to end, then commit the coherent milestone.
+
+#### Addendum: local confirmation of the physical CSI MMIO base
+
+**STATIC-CONFIRMED:** Function `0x400658BC` is the two-instance controller-base setter. It validates `instance < 2` and stores the supplied base into the table rooted at `0x42E68C50`:
+
+```c
+int csi_set_base(unsigned instance, uint32_t base)
+{
+    if (instance >= 2)
+        return -1;
+    ((uint32_t *)0x42E68C50)[instance] = base;
+    return 0;
+}
+```
+
+The CSI initialization path at `0x400660C8` constructs `0x01CB4000` directly in `r1` as `0x01C00000 | 0x000B4000`, sets `r0 = 0`, and calls `0x400658BC`. Therefore:
+
+```text
+controller_base[0] = 0x01CB4000
+```
+
+This locally closes the remaining base-address ambiguity from the preceding section. The stock destination-register path is consequently:
+
+```text
+CSI instance 0 base       0x01CB4000
+CSI destination register  0x01CB4050  (base + 0x50)
+raw bank destination      0x42DF76D4 + bank * 0x2134
+hardware register value   destination >> 2
+```
+
+Equivalent operation:
+
+```c
+uint32_t dst = 0x42DF76D4u + bank * 0x2134u;
+*(volatile uint32_t *)0x01CB4050u = dst >> 2;
+```
+
+For bank 0:
+
+```text
+destination          0x42DF76D4
+encoded destination  0x10B7DDB5
+MMIO write target    0x01CB4050
+```
+
+`0x42E68C50` is therefore confirmed as the RAM-resident controller-base table, not the CSI peripheral itself. Entry 0 is initialized to the physical R11 CSI base `0x01CB4000`. The setter accepts indices 0 and 1, establishing two slots in this driver-level base table; this fact alone does not require assigning a specific physical role to instance 1.
+
+With this confirmation, the CSI destination-address chain is considered **closed for the current acquisition implementation baseline**. Further reverse engineering should prioritize the FPGA/bank-selection and shared-PE capture steps surrounding `0x40040638`, rather than spending additional effort proving the already established BUF0 address write.
+
+### 38. Final per-bank FPGA/PE capture sequencing before standalone smoke test (2026-10-25)
+
+This milestone closes the remaining statically required FPGA/PE-side sequencing around `0x40040638` before the next timeout-protected single-bank Custom App acquisition test. It supersedes the remaining vague references in sections 35-37 to generic bank selection, PE capture state, and unnamed pre/post-capture MMIO transitions.
+
+#### FPGA register 0x1F receives the per-capture bank index
+
+**STATIC-CONFIRMED:** `0x4003FA94(value)` writes its argument directly through the FPGA parallel command bus:
+
+```text
+FPGA selector 0x1F
+FPGA data     value
+```
+
+`0x40040638` calls this helper with its original `r0`, which is the same bank index used by `0x400406C8` to derive the CSI RAM destination. Therefore a single per-bank capture binds the same index to both sides:
+
+```c
+fpga_write_reg(0x1F, bank);
+uint32_t dst = 0x42DF76D4u + bank * 0x2134u;
+MMIO32(0x01CB4050) = dst >> 2;
+```
+
+This is distinct from the previously mapped FPGA command `0x15`. Command `0x15` participates in a higher-level acquisition selector path; command `0x1F` is the directly observed bank-index write inside the per-bank CSI capture primitive. Their exact semantic relationship remains open and they must not be collapsed into one register meaning.
+
+#### Cyclic capture/read-position preparation
+
+**STATIC-CONFIRMED:** `0x4003FAB8` computes a position from three acquisition-state fields:
+
+```c
+uint32_t period = state->field_520;
+uint32_t offset = state->field_63C;
+uint16_t origin = state->field_6F2;
+uint32_t position = (period + offset - origin) % period;
+```
+
+The modulo is implemented explicitly with `UDIV`, multiply and subtraction. The result is tail-called into the already mapped `0x4003F988` path, which applies the cyclic acquisition position through FPGA commands `0x20` and `0x21`.
+
+The same `state + 0x6F2` field also contributes to the ARM raw-buffer source address used by `0x4004073C`. This establishes a direct producer/consumer synchronization relationship around the common ring-origin value, while its exact user-facing semantic name remains conservative.
+
+#### Shared PE interface switches between FPGA GPIO control and CSI sample modes
+
+**STATIC-CONFIRMED:** `0x40049094(mode)` is a cached interface-mode dispatcher. It stores the current mode in the byte at `0x42E68D19` and performs no hardware transition when the requested mode already matches the cached state.
+
+For nonzero mode:
+
+```text
+0x40049094(1)
+    -> 0x400660C0
+    -> 0x40065EF8(0)
+```
+
+The destination helper configures the known CSI pins to PE alternate function 2. Thus mode `1` transfers the shared PE sample pins from the FPGA GPIO control-plane configuration into the R11 CSI sample-plane configuration.
+
+For zero mode:
+
+```text
+0x40049094(0)
+    -> 0x40049110
+```
+
+`0x40049110` uses `PE_CFG0 = 0x01C20890` and restores PE0, PE1, PE2 and PE3 to GPIO function 0. It then establishes the observed GPIO idle levels:
+
+```text
+PE0 = HIGH
+PE1 = LOW
+```
+
+and clears the FPGA parallel-bus software state at:
+
+```text
+0x42E68D18 <- 0
+0x42E68D14 <- 0
+```
+
+Combined with the already confirmed CSI pin configuration, the shared interface lifecycle is:
+
+```text
+GPIO control mode
+    PE0..PE3 controls
+    PE8..PE15 DATA[7:0]
+        |
+        | 0x40049094(1)
+        v
+CSI sample mode
+    PE0       CSI PCLK
+    PE2       CSI HSYNC
+    PE3       CSI VSYNC
+    PE8..PE15 CSI DATA[7:0]
+    PE1       remains available as the observed GPIO capture-level signal
+        |
+        | 0x40049094(0)
+        v
+GPIO control mode restored
+```
+
+#### PE1 is held HIGH for the active CSI capture interval
+
+**STATIC-CONFIRMED:** Both wrappers use the literal `PE_CFG0 = 0x01C20890`; the generic helpers operate on `base + 0x10 = PE_DATA = 0x01C208A0`.
+
+`0x4003F9F8` passes pin index 1 to the GPIO-set helper `0x40063274`, producing:
+
+```c
+MMIO32(0x01C208A0) |= (1u << 1);   /* PE1 HIGH */
+```
+
+`0x4003FA04` passes pin index 1 to the GPIO-clear helper `0x40063288`, producing:
+
+```c
+MMIO32(0x01C208A0) &= ~(1u << 1);  /* PE1 LOW */
+```
+
+Within `0x40040638`, PE1 is set HIGH immediately after CSI capture enable and remains HIGH throughout the wait for CSI completion. It is set LOW immediately after completion. Its exact electrical name remains **OPEN**; `capture gate/handshake` is a useful working description, not an asserted vendor signal name.
+
+#### Exact pre/post-capture MMIO transition
+
+**STATIC-CONFIRMED:** `0x40042C40(instance)` and `0x40042C1C(instance)` operate on:
+
+```c
+reg = 0x01C20C10u + instance * 0x10u;
+```
+
+The capture path passes `instance = 0`.
+
+Before CSI enable, `0x40042C40(0)` clears bit 0:
+
+```c
+MMIO32(0x01C20C10) &= ~1u;
+```
+
+After CSI completion and PE1 deassertion, `0x40042C1C(0)` sets bit 0:
+
+```c
+MMIO32(0x01C20C10) |= 1u;
+```
+
+The physical register address and polarity are therefore confirmed. The official hardware-block/register-field name remains deliberately unnamed until matched against authoritative R11/V3s register documentation.
+
+#### Final statically reconstructed per-bank capture primitive
+
+The essential stock sequence around one logical bank is now:
+
+```text
+1. Compute cyclic position:
+       (state[0x520] + state[0x63C] - state[0x6F2]) % state[0x520]
+
+2. Apply cyclic position through FPGA 0x20 / 0x21.
+
+3. FPGA 0x1F <- bank index.
+
+4. Switch shared PE sample pins from FPGA GPIO control mode to CSI function 2.
+
+5. Program CSI BUF0:
+       destination = 0x42DF76D4 + bank * 0x2134
+       MMIO32(0x01CB4050) = destination >> 2
+
+6. Clear bit 0 at 0x01C20C10.
+
+7. Enable CSI capture.
+
+8. Set PE1 HIGH.
+
+9. Wait for CSI completion:
+       CSI status 0x01CB4074 bit 1 / stock callback state +0x70E.
+
+10. Set PE1 LOW.
+
+11. Set bit 0 at 0x01C20C10.
+
+12. Restore shared PE pins to FPGA GPIO control mode and reset the bus software state.
+
+13. Finalize/clear CSI completion state and acknowledge completion as required.
+```
+
+The stock firmware waits through its callback-backed software completion flag. The first standalone Custom App must instead poll the CSI hardware completion status with a finite timeout so that a missing FPGA stream cannot hang the device.
+
+#### Smoke-test readiness
+
+**DERIVED:** No additional static target is currently mandatory before assembling the next single-bank acquisition smoke test. The critical address, ordering and polarity information required to reproduce the per-bank transport is now locally established.
+
+The first test should remain deliberately narrow:
+
+```text
+bank 0 only
+known-good FPGA GPIO/ID baseline
+required clock and CSI initialization
+fill destination with sentinel bytes
+apply the reconstructed FPGA position/bank setup
+perform GPIO -> CSI transition
+program CSI BUF0 with word-address encoding
+clear 0x01C20C10 bit 0
+ACK stale CSI completion
+CSI enable
+PE1 HIGH
+poll CSI +0x74 bit 1 with finite timeout
+PE1 LOW
+set 0x01C20C10 bit 0
+ACK completion
+restore GPIO control mode
+count changed destination bytes and dump a small prefix
+```
+
+A first success criterion remains intentionally modest: CSI completion must occur and the bank-0 destination must change repeatably from its sentinel pattern. A calibrated or recognizable waveform is not required for this first transport smoke test.
+
+#### Remaining risks after static closure
+
+The principal remaining unknown is no longer the mechanics of the CSI transfer. It is whether the standalone Custom App has reproduced enough of the stock FPGA/acquisition initialization state to make the FPGA emit a valid stream. In particular, the role, if any, of the broader `0x64..0x6B` asynchronous FPGA job/service subsystem in acquisition remains unproven. A timeout or unchanged buffer in the next smoke test must therefore be treated as evidence of missing initialization/state, not as evidence against the now-confirmed CSI transport sequence.
+
+### 39. HW-confirmed dynamic CSI capture window and RAM payload (2026-10-26)
+
+This milestone supersedes the remaining uncertainty in sections 36-38 about whether the stock FPGA actually emits a live waveform stream over the PE/CSI sample plane and whether CSI writes real acquisition bytes into the raw-bank RAM. The result is locally **HW-CONFIRMED** with resident DPOSDBG instrumentation while the stock EXE2 remained operational.
+
+#### Startup checkpoint result: continuous PE activity is not present between init functions
+
+A read-only DPOSDBG checkpoint experiment sampled PE0, PE2, PE3 and PE8..PE15 one million times immediately after each of these confirmed startup calls:
+
+```text
+FPGA_Start
+SMEC_Init
+PowerInit
+HorizontalInit
+VerticalInit
+HardCostTimeInfoInit
+Gen_Init
+0x4004F134
+0x40051CF0
+SysConfigExec
+0x4003D6AC
+0x40049A9C
+0x40052098
+0x4003CF58
+```
+
+No checkpoint observed GPIO-register activity during its bounded window:
+
+```text
+changed_mask = 0x00000000
+```
+
+This does **not** mean the physical sample pins are inactive during acquisition. The later CSI-window experiment proves that the sample pins are dynamically muxed to alternate function 2 only inside a short capture transaction, and PE_DATA does not provide a useful physical-pad activity indication while CSI owns the pins.
+
+Useful pinmux transitions observed in the startup checkpoints include:
+
+```text
+through VerticalInit:
+    PE_CFG0 = 0x77771111
+    PE_CFG1 = 0x00000000
+
+following HardCostTimeInfoInit / later startup work:
+    PE_CFG1 = 0x11111111
+
+later runtime transition:
+    PE_CFG1 returns to 0x00000000
+```
+
+`SMEC_Init()` changes the static PE_DATA state from the earlier value around `0x00000001` to `0x00000701`, but does not itself create a continuously observable GPIO sample stream.
+
+#### HW-CONFIRMED three-phase CSI capture window
+
+DPOSDBG instrumented the stock per-bank capture path around:
+
+```text
+0x40040660  runtime CSI destination programming
+0x4004066C  CSI/capture-control path
+0x40040684  post-completion path before final disable/restore
+```
+
+The first captured bank produced the following three phases.
+
+```text
+DESTINATION_READY:
+    PE_CFG0          0x77772212
+    PE_CFG1          0x22222222
+    CSI IF config    0x01060400
+    CSI mode         0x00000000
+    CSI hsize        0x00000A00
+    CSI destination  0x10B7DDB5
+    CSI IRQ enable   0x00000002
+    CSI status       0x00000000
+    geometry         0x18000000 / 0x00010000 / 0x2374287C
+
+CAPTURE_ACTIVE:
+    PE_CFG0          0x77772212
+    PE_CFG1          0x22222222
+    CSI mode         0x00000001
+    CSI destination  0x10B7DDB5
+    CSI status       0x00000000
+
+CAPTURE_DONE_PRE_DISABLE:
+    PE_CFG0          0x77772212
+    PE_CFG1          0x22222222
+    CSI mode         0x00000000
+    CSI destination  0x10B7DDB5
+    CSI status       0x00000081
+```
+
+This locally proves the dynamic capture lifecycle:
+
+```text
+PE sample pins -> function 2
+CSI destination programmed
+CSI mode 0 -> 1
+capture transaction completes
+CSI mode 1 -> 0
+post-completion status = 0x81
+```
+
+The destination register uses the already reconstructed word-address encoding:
+
+```text
+0x10B7DDB5 << 2 = 0x42DF76D4
+```
+
+Thus the hardware state observed during the live capture agrees exactly with the bank-0 destination derived statically and seen in the earlier runtime destination trace.
+
+#### Important correction: PE_DATA is not a valid activity probe while CSI owns the pins
+
+During all three CSI phases, direct reads of PE_DATA remained static over 4096 reads even though the capture completed successfully. Therefore:
+
+```text
+PE_DATA changed_mask == 0
+```
+
+must not be interpreted as absence of physical PE sample traffic when:
+
+```text
+PE_CFG0 = 0x77772212
+PE_CFG1 = 0x22222222
+```
+
+The R11 CSI peripheral owns the alternate-function pads at that time. CSI mode/status and destination-RAM modification are the appropriate independent evidence of the physical sample transfer.
+
+#### HW-CONFIRMED CSI write into raw bank 0
+
+A second read-only DPOSDBG experiment compared the programmed destination buffer immediately after destination setup and again after CSI completion. CPU cache lines covering the destination were invalidated before each comparison so the post-DMA read reflected RAM contents.
+
+Observed destination:
+
+```text
+CSI destination register  0x10B7DDB5
+physical RAM address      0x42DF76D4
+logical slot size         0x2134 = 8500 bytes
+```
+
+Whole-buffer FNV-1a hashes:
+
+```text
+before capture  0x6355A6D5
+after capture   0xB91D382E
+changed         YES
+```
+
+The buffer was divided into 34 blocks of 256 bytes for coarse change localization. Exactly these blocks changed:
+
+```text
+0..23
+```
+
+Therefore at least the first:
+
+```text
+24 * 256 = 6144 bytes = 0x1800
+```
+
+of the 8500-byte logical slot were modified by the capture, while blocks 24..33 remained unchanged in this experiment.
+
+This locally reproduces the previously external observation that the active payload is `0x1800 = 6144` bytes inside an `0x2134 = 8500` byte logical slot. The remaining `2356` bytes must still not be assigned a fixed meaning without further evidence.
+
+The numeric match between the observed 6144-byte active range and:
+
+```text
+CSI geometry register snapshot  0x18000000
+```
+
+is notable, but the official field semantics of that geometry register remain open.
+
+#### Raw sample appearance
+
+Before the first capture, the tested bank-0 prefix was zero-filled. After completion the prefix contained dense 8-bit values, predominantly around `0x86..0x89` in this particular acquisition:
+
+```text
+before:
+00 00 00 00 00 00 00 00 ...
+
+after:
+00 00 88 87 88 88 87 88 88 87 87 86 88 88 87 88
+88 89 87 87 88 87 88 89 87 88 87 88 88 88 88 87
+...
+```
+
+The far end of the 8500-byte allocation remained zero in this capture, consistent with the block-hash result that only blocks 0..23 changed.
+
+**DERIVED:** The observed changed region contains real acquisition payload bytes rather than merely register/configuration state. Determining exact ADC-core/interleave/channel semantics remains separate work.
+
+#### Completed local transport proof
+
+The following end-to-end path is now locally **HW-CONFIRMED**, not merely statically reconstructed:
+
+```text
+GOWIN FPGA
+    |
+    | PE0 / PE2 / PE3 / PE8..PE15 on alternate function 2
+    v
+R11 CSI @ 0x01CB4000
+    |
+    | destination +0x50 = physical_address >> 2
+    | mode +0x08 transitions 0 -> 1 -> 0
+    | completion lifecycle observed
+    v
+0x42DF76D4 bank-0 RAM
+    |
+    | at least 0x1800 = 6144 bytes changed
+    v
+raw uint8 acquisition payload
+```
+
+This closes the previous active-hardware uncertainty about whether the FPGA sample producer actually reaches ARM RAM through CSI.
+
+#### Consequence for standalone Custom App acquisition
+
+A first standalone single-bank CSI smoke test is now justified. It no longer needs to use PE_DATA transitions as the success criterion.
+
+The minimum success criteria should be:
+
+```text
+1. valid FPGA ID / control-plane baseline
+2. required FPGA/service initialization applied
+3. PE sample pins configured to CSI function 2
+4. CSI destination programmed using address >> 2
+5. CSI mode enters active state
+6. completion observed with a finite timeout
+7. destination cache invalidated after capture
+8. destination buffer differs from its pre-capture/sentinel state
+9. changed region contains nontrivial raw bytes
+```
+
+Useful stock reference values from the confirmed capture are:
+
+```text
+PE_CFG0             0x77772212
+PE_CFG1             0x22222222
+CSI IF config       0x01060400
+CSI hsize           0x00000A00
+CSI IRQ enable      0x00000002
+CSI destination     physical_address >> 2
+CSI active mode     0x00000001
+post-completion     CSI status 0x00000081 observed
+active payload      0x1800 = 6144 bytes in this tested mode
+logical slot stride 0x2134 = 8500 bytes
+```
+
+The stock callback path still establishes status bit 1 as the completion event that is acknowledged with `0x02`; the later `0x81` value is the state observed at the post-completion checkpoint after the stock callback/ack path has already participated.
+
+#### Revised immediate next step
+
+Proceed with the single-bank Custom App smoke test. Reproduce only the minimum confirmed state needed for one bank, poll completion with a finite timeout, invalidate the destination cache, and report buffer change/hash/prefix diagnostics. If this fails, treat the result as evidence of missing FPGA/SMEC/acquisition initialization rather than reopening the already HW-confirmed PE/CSI/RAM transport path.
