@@ -43,6 +43,75 @@ memory guards                        PASS
 
 No Custom App test has yet observed CSI completion or changed capture bytes.
 
+## HW-confirmed FPGA_Start runtime boundary
+
+DPOSLAB resident runtime instrumentation can now intercept the stock
+`FPGA_Start()` call at `0x40034738`, execute the original function at
+`0x40049188`, capture state immediately after return, and resume stock
+execution at `0x4003473C`.
+
+The experiment was repeated across three cold boots and produced
+identical hardware-register observations.
+
+### CPU / ABI
+
+Before:
+- CPSR: `0x60000153`
+- stock SP: `0x42FE8D20`
+
+After:
+- CPSR: `0x20000153`
+- changed GPR mask: `0x0000100F`
+
+The changed GPR mask corresponds to `r0-r3` and `r12`.
+`r4-r11` were preserved across `FPGA_Start()`.
+
+The DPOSLAB FPGA execution stack was `0x42FE8CE8`, exactly 0x38
+(56) bytes below the stock SP, matching the resident wrapper's
+`push {r0-r12, lr}` frame.
+
+### PE state
+
+Before -> After:
+
+- `PE_CFG0`: `0x77777777` -> `0x77771111`
+- `PE_CFG1`: `0x77777777` -> `0x00000000`
+- `PE_DATA`: `0x01400000` -> `0x01700001`
+- `PE_PULL0`: `0x00000000` -> `0x00000000`
+
+This confirms that `FPGA_Start()` establishes the stock PE
+parallel-control idle state before returning:
+PE0..PE3 are GPIO outputs, PE8..PE15 are GPIO inputs, and PE0 is
+high while PE1 is low.
+
+### CSI state
+
+Before -> After:
+
+- `CSI_IF_CFG`: `0x00000000` -> `0x01050400`
+- `CSI_MODE`: `0x00000000` -> `0x00000000`
+- `CSI_HSIZE`: `0x00000000` -> `0x00000A00`
+- `CSI_DEST(+0x50)`: `0x00000000` -> `0x10E7DDB5`
+- `CSI_IRQ_ENABLE`: `0x00000000` -> `0x00000002`
+- `CSI_STATUS`: `0x00000000` -> `0x00000000`
+
+Therefore `FPGA_Start()` configures a reproducible subset of the CSI
+block before returning, but the observed MODE and STATUS registers
+remain zero at the function boundary.
+
+The `0x10E7DDB5` value observed at CSI+0x50 is reproducible across
+all three runs but is not yet interpreted as a DMA destination address.
+
+### CCU boundary observation
+
+- `CCU_GATE0`: `0x00104100` -> `0x00104100`
+- `CCU_RESET0`: `0x00104100` -> `0x00104100`
+
+No net change was observed in these two CCU registers across the whole
+`FPGA_Start()` call. This does not exclude transient clock/reset changes
+inside the function.
+
+
 ### STATIC-CONFIRMED: current acquisition-start ordering
 
 Runtime bank loop around `0x40041524` performs:
@@ -71,6 +140,277 @@ FPGA register 0x1F <- R0
 Thus the next implementation/debug step must not treat isolated `0x15` and `0x08` writes as the complete stock acquisition start sequence.
 
 ---
+
+### HW-CONFIRMED minimal runtime prerequisite for FPGA_Start
+
+DPOSLAB minimal-runtime A/B testing isolated a previously missing prerequisite
+for the stock `FPGA_Start()` path.
+
+The beginning of stock `main()` is:
+
+    0x40034708  BL 0x4004282C   sys_clock_init(1152000000)
+    0x4003470C  BL 0x40042A60   sys_mmu_init()
+    0x40034710  BL 0x40042D28   System_Init()
+    ...
+    0x40034738  BL 0x40049188   FPGA_Start()
+
+`System_Init()` decomposes into:
+
+    System_Init @ 0x40042D28
+        |
+        +-- BL 0x40042C94     Part 1
+        |
+        `-- B  0x40042CD8     Part 2
+
+DPOSLAB intercepted execution at `0x40034710`, after `sys_clock_init()` and
+`sys_mmu_init()` but before `System_Init()`. A hook-only control completed
+successfully, confirming that this interception point is reached and remains
+usable without executing either part of `System_Init()`.
+
+A minimal stock path was then tested with only `System_Init` Part 2 enabled:
+
+    sys_clock_init
+      -> sys_mmu_init
+      -> System_Init Part 2 @ 0x40042CD8
+      -> stock FPGA_Start
+      -> stock SMEC Job 1
+      -> stock SMEC Job 2
+
+`System_Init` Part 1 at `0x40042C94` and all normal application initialization
+were skipped.
+
+This path completed successfully:
+
+    System_Init Part 1      SKIPPED
+    System_Init Part 2      PASS
+    stock FPGA_Start        PASS
+    Job 1 result66          0x01010101
+    Job 2 result66          0x03030303
+
+A direct negative-control build was then made from the known-good image.
+The only functional change was removal of the call to:
+
+    0x40042CD8
+
+With Part 2 disabled, the subsequent stock `FPGA_Start()` path no longer
+completed.
+
+**HW-CONFIRMED conclusion:**
+
+`System_Init` Part 2 at `0x40042CD8` is a prerequisite for the tested minimal
+stock `FPGA_Start()` path.
+
+`System_Init` Part 1 at `0x40042C94` is not required for this path.
+
+The current minimum confirmed stock dependency chain is therefore:
+
+    sys_clock_init
+        -> sys_mmu_init
+        -> System_Init Part 2
+        -> FPGA_Start
+
+Static analysis of Part 2 shows:
+
+    0x40042CD8
+        +-- 0x40042D40
+        `-- 0x40042D4C
+
+Both paths use the common implementation at `0x40042D54`, with observed MMIO
+accesses including:
+
+    0x01C20144
+    0x01C20C8C
+
+and constants:
+
+    24000
+    24
+
+**INTERPRETATION:** Part 2 strongly resembles initialization of timer/timebase
+resources. The exact peripheral semantics and the specific dependency inside
+`FPGA_Start()` are not yet proven.
+
+#### Implementation consequence
+
+A standalone `FPGA_Start()` reproduction must not begin from the assumption
+that `sys_clock_init()` and `sys_mmu_init()` alone establish the required stock
+platform state.
+
+The equivalent state produced by `System_Init` Part 2 must also be reproduced
+before judging a custom `FPGA_Start()` implementation against stock behavior.
+
+This is now a leading explanation for the earlier Custom App result where the
+FPGA control path and Job 1 worked but Job 2 did not reproduce stock behavior.
+
+
+## FPGA_Start runtime phase decomposition
+
+DPOSLAB runtime tracing now provides automatic passive snapshots at selected
+stock call boundaries. Records are accumulated in resident RAM and exported
+manually as `DPOSLAB.TRC` through the stock Screenshot path.
+
+The following observations are HW-confirmed.
+
+### Confirmed execution timeline
+
+Current checkpoints:
+
+```text
+FPGA_START_ENTRY
+  0x40049188
+      |
+      | 0x40049194: BL 0x400660C8
+      |
+      |    0x400660C8(8000)
+      |        |
+      |        | 0x400660D4: BL 0x40065F48
+      |        |
+      |        +-- CSI_AFTER_CLOCK_RESET
+      |            continuation 0x400660D8
+      |
+      +-- FPGA_EARLY_INIT
+          continuation 0x40049198
+              |
+              | 0x400491A8: BL 0x40049094
+              |
+              +-- FPGA_PHASE_A
+                  continuation 0x400491AC
+                      |
+                      +-- remaining FPGA_Start chain
+                      |
+                      +-- FPGA_START_RETURN
+                          continuation 0x4003473C
+```
+Phase 1: clock/reset and initial CSI state
+
+Immediately after stock 0x40065F48:
+
+Plain Text
+CSI_IF_CFG 0x00000000 -> 0x01050000
+CSI_HSIZE 0x00000000 -> 0x00300200
+
+The returned register state also contains:
+
+Plain Text
+r0 = 0x01C20134
+r1 = 0x81008000
+
+Static analysis of 0x40065F48 confirms that this routine performs read/modify/write operations around the CCU region near 0x01C20100, waits for a status/lock bit, and finishes with a write using the 0x81008000 value.
+
+Therefore 0x40065F48 is part of the CSI clock/reset bring-up and, by its return boundary, the CSI block already exposes an initial configuration state.
+
+The precise mechanism by which the initial CSI register values arise still requires decomposition of the helper calls inside 0x40065F48.
+
+Phase 2: full early CSI initialization
+
+Between CSI_AFTER_CLOCK_RESET and the return from 0x400660C8:
+
+Plain Text
+PE_CFG0 0x77777777 -> 0x77772272
+PE_CFG1 0x77777777 -> 0x22222222
+ 
+CSI_IF_CFG 0x01050000 -> 0x01060400
+CSI_HSIZE 0x00300200 -> 0x00000A00
+CSI_DESTINATION 0x00000000 -> 0x10B7DDB5
+CSI_IRQ_ENABLE 0x00000000 -> 0x00000002
+
+Thus 0x400660C8 is confirmed as an early CSI initialization orchestrator.
+
+Its statically confirmed call chain is:
+
+Plain Text
+0x400660C8(8000)
+|
++-- 0x40065F48(0)
++-- 0x400658BC(0, 0x01CB4000)
++-- 0x40065C68(0)
++-- 0x40065C64(0)
++-- 0x40065FA8(8000)
+|
++-- tail 0x40066054
+
+0x400658BC(0, 0x01CB4000) stores the CSI base into the instance table at 0x42E68C50.
+
+0x40065FA8(8000) initializes stock CSI software/configuration structures before invoking lower-level configuration routines.
+
+The exact ownership of the final IF_CFG, HSIZE, destination and IRQ values will be determined by additional runtime checkpoints between these calls.
+
+Phase 3: transition from CSI pinmux to FPGA GPIO control bus
+
+Immediately after 0x400660C8:
+
+Plain Text
+PE_CFG0 = 0x77772272
+PE_CFG1 = 0x22222222
+
+This represents the CSI-side pinmux state.
+
+After the subsequent call:
+
+Plain Text
+0x400491A8: BL 0x40049094
+
+the state becomes:
+
+Plain Text
+PE_CFG0 0x77772272 -> 0x77771111
+PE_CFG1 0x22222222 -> 0x00000000
+PE_DATA 0x01400000 -> 0x01400001
+
+The CSI configuration registers remain unchanged across this transition.
+
+This HW-confirms that 0x40049094 does not establish the CSI configuration. Instead, it transitions the shared PE interface from CSI pinmux mode into the parallel FPGA GPIO control-bus idle state.
+
+The resulting state is:
+
+Plain Text
+PE0..PE3 GPIO output
+PE8..PE15 GPIO input
+PE0 high
+PE1 low
+Remaining FPGA_Start phase
+
+From FPGA_PHASE_A to FPGA_START_RETURN, the currently monitored CSI configuration registers remain stable.
+
+The only monitored PE change is:
+
+Plain Text
+PE_DATA 0x01400001 -> 0x01700001
+
+Because PE8..PE15 are inputs in this phase, their bits in PE_DATA must not be interpreted simply as output latch values.
+
+The remaining phase contains the previously identified clock/configuration chain including:
+
+Plain Text
+0x400490B8
++-- 0x4005F1BC
++-- 0x4005F1F0
++-- tail 0x4005F38C
+
+Internal state changes in this later chain have not yet been fully traced.
+
+Implication for the custom FPGA_Start reproduction
+
+The stock initialization order is now known to be more complex than the original custom PE/FPGA handshake reproduction.
+
+HW-confirmed ordering:
+
+Plain Text
+CSI clock/reset bring-up
+|
+initial CSI register state
+|
+full CSI configuration
+|
+CSI PE pinmux
+|
+transition to FPGA GPIO control-bus mode
+|
+remaining FPGA clock/configuration chain
+
+Therefore a custom reproduction consisting only of PE GPIO setup and the FPGA ID handshake is incomplete.
+
+The final custom implementation should not yet hard-code the observed boundary values. The remaining internal CSI checkpoints should first identify the minimal stock sequence and required ordering.
 
 ### Runtime-trace checkpoint (2026-10-25)
 
@@ -4063,3 +4403,266 @@ The stock callback path still establishes status bit 1 as the completion event t
 #### Revised immediate next step
 
 Proceed with the single-bank Custom App smoke test. Reproduce only the minimum confirmed state needed for one bank, poll completion with a finite timeout, invalidate the destination cache, and report buffer change/hash/prefix diagnostics. If this fails, treat the result as evidence of missing FPGA/SMEC/acquisition initialization rather than reopening the already HW-confirmed PE/CSI/RAM transport path.
+
+## 40. Standalone custom FPGA acquisition milestone (2026-10-29)
+
+This section is authoritative for the currently supported fixed-profile standalone runtime. It supersedes earlier statements that the Custom App had not observed CSI completion, that the minimum FPGA/service initialization remained unknown, or that a stock-assisted acquisition path was still required.
+
+### 40.1 Current code-level architecture
+
+Where the mapping is established, use the current project names instead of address-only or historical phase names:
+
+```text
+FPGA initialization                    fpga_init()
+FPGA parallel control bus              fpga_bus_*()
+FPGA register/protocol operations      fpga_protocol_*()
+MS5351M clock initialization           ms5351_*()
+R11 CSI initialization and control     r11_csi_*()
+minimal SMEC startup path              smec_init()
+fixed-profile configuration            profile_init()
+acquisition readiness                  acq_prepare()
+stream geometry and quantity setup     acq_configure_stream()
+single-bank CSI transfer               acq_capture()
+```
+
+Historical stock addresses remain valid reverse-engineering anchors, but descriptions of the working custom runtime should prefer these code-level names.
+
+### 40.2 Standalone initialization chain
+
+The successful standalone path is:
+
+```text
+custom Timer0 + AVS initialization
+        -> fpga_init()
+        -> smec_init()
+        -> profile_init()
+        -> acq_capture()
+        -> CSI completion
+        -> full 0x1800-byte RAM payload
+```
+
+No stock EXE2 acquisition function executes in this path.
+
+### 40.3 System_Init Part 2 resolved as AVS timebase setup
+
+The previously unnamed `System_Init` Part 2 prerequisite at `0x40042CD8` has now been identified precisely enough for standalone reproduction.
+
+Static call chain:
+
+```text
+System_Init              0x40042D28
+  Part 1                 0x40042C94
+  Part 2 / AVS init      0x40042CD8
+    channel 0 setup      0x40042D40  divisor 24000
+    channel 1 setup      0x40042D4C  divisor 24
+    common setup         0x40042D54
+```
+
+Confirmed register effects:
+
+```text
+0x01C20144 |= 0x80000000
+AVS channel 0 divisor = 24000
+AVS channel 1 divisor = 24
+0x01C20C8C = 0x00175DBF
+```
+
+The stock AVS delay primitive clears counter 0 at `0x01C20C84`, enables counter 0 through bit 0 of `0x01C20C80`, and waits for `(counter0 << 1)` to reach the requested delay units.
+
+This matches the custom `timer_avs_delay_units()` implementation. The missing state was the AVS timebase initialization, not the delay loop itself.
+
+**STATIC-CONFIRMED:** stock `System_Init` configures both AVS divider channels before the relevant delay path is used.
+
+**HW-CONFIRMED:** after adding the AVS setup to custom timer initialization, `profile_init()` completes all seven fixed-profile steps instead of stalling in `timer_avs_delay_units(2)`.
+
+### 40.4 FPGA initialization status
+
+The custom FPGA initialization path is now sufficient for real acquisition, not only for the diagnostic ID handshake.
+
+The working custom path includes:
+
+```text
+FPGA control-bus setup and ID probe
+R11 CSI initialization
+shared PE GPIO/CSI mode handling
+MS5351M clock setup
+fixed CSI receiver state required by the supported profile
+```
+
+**HW-CONFIRMED:** `fpga_init()` succeeds as part of the standalone path that reaches CSI completion and transfers the complete active payload into RAM.
+
+The earlier boundary remains important: the minimal diagnostic ID sequence alone is not equivalent to `fpga_init()`. The proven result applies to the complete current custom initialization path.
+
+### 40.5 Current fixed-profile stream configuration
+
+The supported standalone profile uses:
+
+```text
+APP_STATE +0x640          0x17FA
+APP_STATE +0x6F2          0x0003
+CSI payload / geometry    0x1800 bytes
+FPGA selector 0x22 value  0x300E
+```
+
+The corresponding arithmetic remains:
+
+```text
+CSI geometry  = A + 2*B       = 0x17FA + 2*3 = 0x1800
+FPGA quantity = 20 + 2*(A+B)  = 0x300E
+```
+
+The custom implementation expresses the downstream operation through:
+
+```text
+r11_csi_configure_fixed_stream_geometry()
+fpga_protocol_stream_set_quantity(0x300E)
+```
+
+The current values are fixed-profile constants. Their general derivation for other timebases, channel modes and acquisition modes remains open.
+
+### 40.6 Current custom per-bank capture sequence
+
+The working `acq_capture()` path performs the following sequence:
+
+```text
+1. configure fixed CSI stream geometry
+2. write FPGA stream quantity 0x300E
+3. prepare cyclic capture position
+4. select the FPGA bank
+5. switch the shared PE interface to CSI mode
+6. program CSI buffer 0
+7. acknowledge stale CSI completion
+8. stop/gate Timer0 as required by the reconstructed capture sequence
+9. enable CSI capture
+10. assert the FPGA capture gate
+11. wait for CSI completion with a finite bounded poll
+12. release the FPGA capture gate
+13. restore Timer0 state
+14. acknowledge CSI completion
+15. disable CSI capture
+16. restore the shared PE interface to FPGA GPIO mode
+```
+
+This is the custom equivalent of the previously reconstructed stock per-bank transport role. The implementation no longer calls stock `0x400405E0`, stock acquisition prepare `0x4003FA10`, or stock per-bank primitive `0x400406C8`.
+
+### 40.7 Hardware-confirmed standalone result
+
+```text
+FPGA INIT       YES
+SMEC PASS       YES
+PROFILE PASS    YES
+STEPS DONE      0x0000007F
+FAILED STEP     0x00000000
+
+CAPTURE CALL    YES
+CAPTURE PASS    YES
+HW DONE         YES
+CSI BEFORE      0x00000000
+CSI AFTER       0x00000083
+CSI MODE        0x00000000
+CSI BUF0        0x100017C0
+CSI IRQ EN      0x00000002
+WAIT POLLS      0x00000001
+
+RAM CHANGED     YES
+CHANGED BYTES   0x00001800
+FIRST CHANGE    0x00000000
+LAST CHANGE     0x000017FF
+HASH BEFORE     0x50B995C5
+HASH AFTER      0x8FD97C05
+```
+
+The observed CSI buffer register is the word-address encoding of the standalone capture buffer. The complete expected range changed:
+
+```text
+0x0000 .. 0x17FF = 0x1800 bytes
+```
+
+**HW-CONFIRMED:** the FPGA emits a valid stream through the shared PE/CSI sample plane, the R11 CSI peripheral signals completion, and the complete fixed-profile active payload reaches custom-app RAM.
+
+This proof is stronger than `FPGA READY`, CSI register parity, or a one-byte destination change. It establishes the full custom control-plane and sample-plane path for the supported fixed profile.
+
+### 40.8 SMEC and FPGA protocol boundary
+
+The successful path still includes `smec_init()`. Therefore this result does not show that SMEC is optional.
+
+It does show that the custom minimal SMEC implementation is sufficient for proper FPGA operation through a real completed acquisition. No unreconstructed stock SMEC function is required by the current fixed-profile capture path.
+
+The key-like / "magic" register sequences used by `profile_init()` remain part of the working FPGA apply protocol. Their exact semantic role is still open. Similar sequences may recur when additional FPGA commands are identified, so they should be treated as protocol landmarks rather than discarded as one-off SysConfig artifacts.
+
+### 40.9 Superseded statements and plans
+
+The following older statements are now superseded for the supported fixed profile:
+
+```text
+"No Custom App test has yet observed CSI completion or changed capture bytes."
+"The minimum FPGA full-state initialization required for streaming is unknown."
+"Proceed with the first single-bank CSI smoke test."
+"Custom acquisition still depends on stock stream/acquisition helpers."
+"A stock-assisted fallback is required for the current capture path."
+```
+
+The following are now resolved:
+
+```text
+Does custom FPGA initialization support real capture?     YES
+Does custom SMEC support real capture?                    YES
+Does the fixed custom profile reach completion?           YES, 0x7F steps
+Does CSI signal hardware completion?                      YES
+Does RAM receive the full active payload?                 YES, 0x1800 bytes
+Is stock EXE2 required for this capture path?              NO
+```
+
+### 40.10 Current authoritative fixed-profile architecture
+
+```text
+CONTROL PLANE
+ARM/R11
+  -> fpga_bus_*()
+  -> fpga_protocol_*()
+  -> custom FPGA registers, profile and capture commands
+  -> GOWIN FPGA
+
+CLOCK / SERVICE CONFIGURATION
+ARM/R11
+  -> ms5351_*()
+  -> smec_init()
+  -> profile_init()
+  -> GOWIN FPGA and associated front-end/service path
+
+SAMPLE PLANE
+GOWIN FPGA
+  -> shared PE pins in CSI function 2
+  -> R11 CSI @ 0x01CB4000
+  -> custom 0x1800-byte aligned RAM buffer
+  -> HW DONE / CSI status
+```
+
+### 40.11 Updated development direction
+
+The transport and fixed-profile acquisition mechanics are no longer the principal blocker. The next FPGA work should proceed in this order:
+
+```text
+1. preserve the current standalone acquisition as the golden baseline
+2. generalize profile derivation beyond fixed +0x640/+0x6F2 values
+3. identify and name additional FPGA commands
+4. correlate additional commands with SMEC jobs and key/magic apply sequences
+5. restore analog frontend/channel configuration
+6. validate sample interpretation, calibration and measurement correctness
+7. expand from one fixed capture profile to selectable operating modes
+```
+
+The current baseline must continue to require all of:
+
+```text
+FPGA INIT       YES
+SMEC PASS       YES
+PROFILE PASS    YES
+STEPS DONE      0x0000007F
+CAPTURE PASS    YES
+HW DONE         YES
+RAM CHANGED     YES
+CHANGED BYTES   0x00001800
+FIRST CHANGE    0x00000000
+LAST CHANGE     0x000017FF
+```

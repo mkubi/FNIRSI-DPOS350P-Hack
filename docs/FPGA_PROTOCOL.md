@@ -1,8 +1,8 @@
 # FNIRSI DPOS350P ARM-to-FPGA Protocol
 
-> **Status:** Working implementation reference  
-> **Target firmware build:** `8eeb56ba0086` / FNIRSI update dated 2025-06-19  
-> **Last updated:** 2026-10-25  
+> **Status:** Working implementation reference
+> **Target firmware build:** `8eeb56ba0086` / FNIRSI update dated 2025-06-19
+> **Last updated:** 2026-10-28
 > **Companion evidence record:** `docs/FPGA.md`
 
 This document is the concise implementation reference for the DPOS350P ARM-to-FPGA interface. It records what a driver or standalone acquisition application can rely on today. Investigation history, disassembly notes, failed experiments, call graphs, and competing hypotheses belong in `docs/FPGA.md`.
@@ -191,12 +191,54 @@ This map intentionally contains only locally established commands and clearly la
 - Evidence: **EXTERNAL STATIC-CONFIRMED**.
 - Local runtime confirmation: **OPEN**.
 
-### `0x20`, `0x21`, `0x22`
+### `0x20`, `0x21`: cyclic capture-position preparation
 
-- Direction and width: acquisition-path dependent.
-- Current working role: acquisition quantity, bank, or capture-control parameters.
-- Evidence: **INFERRED** from local static acquisition reconstruction.
-- Exact public names must remain neutral until a focused trace confirms each field.
+- Direction: write.
+- Current working role: requested cyclic-position preparation before a per-bank CSI capture.
+- Evidence: **STATIC-CONFIRMED** locally.
+- Exact relationship to returned acquisition-position selectors `0x18` and `0x14` remains **INFERRED**.
+
+### `0x22`: FPGA stream quantity
+
+- Direction: write.
+- Width: two bytes, big-endian.
+- Producer: stock `0x400405E0`.
+- Evidence: **STATIC-CONFIRMED / HW-CONFIRMED**.
+
+Stock `0x400405E0` consumes two unsigned 16-bit `SYS_INFO` fields:
+
+```text
+A = SYS_INFO +0x640
+B = SYS_INFO +0x6F2
+```
+
+It derives both the CSI receiver geometry and FPGA-side stream quantity:
+
+```text
+CSI geometry  = (A + 2*B) & 0xFFFF
+FPGA quantity = (20 + 2*(A+B)) & 0xFFFF
+```
+
+The function first calls `0x40065FA8(CSI geometry)`, then emits:
+
+```text
+select 0x22
+write quantity[15:8]
+write quantity[7:0]
+```
+
+For the **HW-CONFIRMED** fixed acquisition profile:
+
+```text
+A             = 0x17FA
+B             = 0x0003
+CSI geometry  = 0x1800
+FPGA quantity = 0x300E
+```
+
+With these values, one Bank0 capture changes exactly `0x1800` consecutive bytes, from offset `0x0000` through `0x17FF`.
+
+The FPGA quantity is not a direct RAM byte count. For this fixed profile only, `0x300E = 2 * 0x1800 + 0x000E`. Do not generalize the `+0x000E` form because the stock equations depend on A and B independently.
 
 ### `0x28`: CH1 vertical apply path
 
@@ -670,6 +712,49 @@ This is consistent with several ADC/interleave lanes requiring per-slot calibrat
 
 The meaning of the remaining 2356 bytes is **OPEN**. Do not label the area as simple padding until verified. Possible uses include allocation headroom, ring-origin handling, guards, alignment, or mode-dependent data.
 
+### 10.5 Stream geometry and FPGA quantity
+
+**STATIC-CONFIRMED / HW-CONFIRMED:** Stock `0x400405E0` coordinates the CSI receiver geometry with FPGA selector `0x22`.
+
+For the confirmed fixed profile:
+
+```text
+SYS_INFO +0x640 = 0x17FA  (u16)
+SYS_INFO +0x6F2 = 0x0003  (u16)
+
+CSI geometry  = 0x17FA + 2*0x0003 = 0x1800
+FPGA quantity = 20 + 2*(0x17FA + 0x0003) = 0x300E
+RAM payload   = 0x1800 bytes
+```
+
+**HW-CONFIRMED:** Custom SC1.3 substitution testing cleanly separated acquisition readiness from bulk-stream geometry.
+
+```text
+T1..T5:
+    FPGA 0x0A        0xC0 -> 0xC1
+    READY            YES
+    CSI DONE         YES
+    Bank0 changed    6 bytes
+
+T6 adds only:
+    SYS_INFO +0x640  0x17FA
+    SYS_INFO +0x6F2  0x0003
+
+T6 result:
+    GEOM             0x1800
+    FPGA 0x22 value  0x300E
+    Bank0 changed    0x1800 bytes
+    first offset     0x0000
+    last offset      0x17FF
+```
+
+Consequences for a standalone driver:
+
+- FPGA READY and CSI DONE do not by themselves prove that the expected payload length was transferred.
+- CSI receiver geometry and FPGA-side stream quantity must be configured consistently.
+- For the current fixed profile, `SYS_INFO +0x640/+0x6F2` are the confirmed missing link between the SC1.3 timing/configuration state and full-length Bank0 capture.
+- The fixed-profile values are implementation evidence, not yet a general formula for deriving A and B for arbitrary timebases or channel modes.
+
 ---
 
 ## 11. Acquisition status and control: current boundary
@@ -679,16 +764,21 @@ The following are established:
 - The FPGA is configured before the Custom App begins.
 - The diagnostic identity transaction works under the custom boot chain.
 - CSI1 is the bulk sample path.
-- The ring contains eight logical slots with 6144 active bytes each.
-- Stock acquisition is gated by a run/stop field and checks FPGA status.
+- The ring contains eight logical slots with `0x1800` active bytes in the confirmed fixed profile.
+- Stock acquisition checks FPGA selector `0x0A`; the confirmed minimal custom chain reaches `0xC0 -> 0xC1` and READY.
+- Stock `0x400405E0` derives CSI geometry from `SYS_INFO +0x640/+0x6F2` and writes the FPGA-side quantity through selector `0x22`.
+- `GEOM=0x1800` together with FPGA quantity `0x300E` produces a full `0x1800`-byte Bank0 transfer on local hardware.
+- READY and CSI DONE are separate from correct stream length; both occurred during the six-byte T1..T5 partial-pass state.
+- The minimum startup dependency established so far includes the custom FPGA/CSI clock baseline, custom SMEC S4 jobs, custom Horizontal H2, custom SC1.2, custom fixed-profile SC1.3 T6, and custom SC1.5.1..SC1.5.4; SC1.5.5 is not required for this fixed-profile acquisition path.
 
-The following remain necessary before the first reliable standalone capture:
+The following remain open or incomplete before a stock-independent general acquisition driver:
 
-1. Exact minimum FPGA acquisition command sequence.
-2. Exact CSI start, completion, and interrupt/status handling.
-3. Relationship between FPGA command `0x22`, CSI active length, and acquisition mode.
-4. Initial channel, timebase, and trigger values required for a safe fixed profile.
-5. Whether any part of the 50-job startup transform is required before standalone acquisition in the custom boot path.
+1. General derivation of `SYS_INFO +0x640` and `SYS_INFO +0x6F2` for timebases/channel modes other than the confirmed fixed profile.
+2. Exact semantic units represented by FPGA selector `0x22` quantity `0x300E`.
+3. Whether `+0x6F2` changes with channel count, acquisition mode, or other stream framing choices.
+4. Removal/reimplementation of the remaining stock runtime dependencies around acquisition prepare, `0x400405E0`, and the per-bank capture wrapper.
+5. Initial channel, V/div, trigger, and timebase parameter derivation for profiles beyond the current fixed baseline.
+6. Whether all seven custom SMEC S4 jobs remain necessary for every acquisition mode, even though S4 as a whole is HW-confirmed required in the current minimal baseline.
 
 Current evidence does **not** support blindly copying all 50 startup jobs into the Custom App. They may represent POST, parameter initialization, calculation-engine setup, or secure-device interaction rather than the minimum capture path.
 
@@ -837,15 +927,15 @@ Do not promote an inferred command name to the driver API without evidence.
 
 Priority order:
 
-1. Trace the exact stock FPGA command sequence around one capture start.
-2. Trace one controlled timebase change.
-3. Trace one V/div change without dragging.
-4. Trace STOP, RUN, and SINGLE acquisition paths at selected call sites.
-5. Correlate FPGA status command `0x0A` with CSI completion.
-6. Reproduce the minimum sequence in a timeout-bounded Custom App smoke test.
-7. Determine lane/interleave order only after raw capture succeeds.
+1. Reproduce `0x400405E0` locally: derive/program CSI geometry and selector `0x22` without the stock helper.
+2. Reverse the stock producers of `SYS_INFO +0x640` and `SYS_INFO +0x6F2` so T6 constants become profile-derived values.
+3. Replace the remaining stock acquisition-prepare and per-bank capture helpers with bounded custom equivalents already proven in isolation.
+4. Repeat the stream-input/geometry trace for one controlled timebase change and determine how A, B, GEOM, and `0x22` quantity vary.
+5. Repeat for CH1+CH2 to establish whether `+0x6F2` encodes channel/interleave framing.
+6. Correlate FPGA selector `0x0A`, requested/actual position selectors, CSI DONE, and per-bank sequencing in the fully custom path.
+7. Determine lane/interleave order and calibration only after stock-independent raw capture is stable.
 
-The `0x64..0x6B` job protocol is now sufficiently documented for a generic helper, but it should not block the first raw-acquisition attempt unless focused tracing proves a direct dependency.
+The `0x64..0x6B` job protocol is sufficiently documented for a generic helper. The current fixed-profile minimal baseline requires custom SMEC S4, but the semantic purpose of the asynchronous job engine remains deliberately neutral.
 
 ---
 
@@ -875,3 +965,243 @@ When a new finding is made:
 5. If evidence changes, preserve the history in `docs/FPGA.md` and correct this file without retaining obsolete implementation guidance.
 
 This separation keeps the complete reverse-engineering record while giving the Custom App a concise, reliable specification.
+
+## 18. Standalone protocol baseline (2026-10-29)
+
+This section supersedes the implementation-status and "first standalone acquisition" guidance in sections 11, 13, and 15 for the currently supported fixed profile. The earlier sections remain useful for provenance and protocol history.
+
+### 18.1 End-to-end status
+
+The ARM-to-FPGA protocol is now exercised successfully by `apps/acq_test` without executing the stock EXE2 acquisition runtime.
+
+Current standalone path:
+
+```text
+custom Timer0 + AVS initialization
+        -> fpga_init()
+        -> smec_init()
+        -> profile_init()
+        -> acq_capture()
+        -> CSI HW completion
+        -> full 0x1800-byte RAM payload
+```
+
+**HW-CONFIRMED:** the custom protocol implementation is sufficient for a real fixed-profile FPGA capture, not merely for FPGA ID, READY, or CSI register setup.
+
+### 18.2 Current implementation names
+
+Use the current project names where the behavior is known:
+
+```text
+physical PE bus                         fpga_bus_*()
+FPGA selector/register protocol         fpga_protocol_*()
+FPGA + CSI + clock initialization       fpga_init()
+minimal startup job/service path        smec_init()
+fixed-profile apply                     profile_init()
+acquisition READY preparation           acq_prepare()
+stream geometry + quantity              acq_configure_stream()
+single capture                          acq_capture()
+CSI receiver                            r11_csi_*()
+```
+
+The old proposed `dpos_fpga.*` / `dpos_acq.*` names in section 12 are historical design guidance. The implemented driver split is now `fpga_bus`, `fpga_protocol`, `fpga_init`, `smec`, `profile`, `acq`, and `r11_csi`.
+
+### 18.3 Fixed-profile stream contract
+
+The currently supported profile has:
+
+```text
+A = APP_STATE +0x640 = 0x17FA
+B = APP_STATE +0x6F2 = 0x0003
+
+CSI geometry  = A + 2*B       = 0x1800
+FPGA quantity = 20 + 2*(A+B)  = 0x300E
+```
+
+The custom implementation applies the downstream protocol as:
+
+```text
+r11_csi_configure_fixed_stream_geometry()
+fpga_protocol_stream_set_quantity(0x300E)
+```
+
+**STATIC-CONFIRMED + HW-CONFIRMED:** FPGA selector `0x22` is the FPGA-side stream-quantity control paired with CSI receiver geometry. For the fixed profile, `0x22 <- 0x300E` together with CSI geometry `0x1800` produces the complete contiguous `0x1800`-byte transfer.
+
+The semantic unit of `0x300E` remains **OPEN**. It must not be renamed to a byte-count field.
+
+### 18.4 Acquisition protocol implemented by acq.c
+
+The custom capture path now implements the required per-capture protocol without stock helpers:
+
+```text
+configure CSI geometry
+FPGA selector 0x22 <- stream quantity
+prepare cyclic position
+select capture bank
+switch shared PE interface to CSI mode
+program CSI buffer 0
+ACK stale CSI DONE
+Timer0 gate/transition required by stock sequence
+CSI capture enable
+FPGA capture gate assert
+bounded poll for CSI DONE
+FPGA capture gate release
+restore Timer0 gate/state
+ACK CSI DONE
+CSI capture disable
+restore shared PE interface to GPIO control mode
+```
+
+The current driver APIs are:
+
+```c
+int acq_prepare(
+    uint8_t mode,
+    uint32_t max_polls,
+    struct acq_prepare_result *result);
+
+int acq_capture(
+    uintptr_t buffer,
+    uint16_t position,
+    uint8_t bank,
+    uint32_t timeout_iterations,
+    struct acq_capture_result *result);
+```
+
+**HW-CONFIRMED:** this custom path replaces the capture roles previously performed by stock `0x4003FA10`, `0x400405E0`, and `0x400406C8` in the fixed-profile acquisition oracle.
+
+### 18.5 Hardware result
+
+```text
+FPGA INIT       YES
+SMEC PASS       YES
+PROFILE PASS    YES
+STEPS DONE      0x0000007F
+FAILED STEP     0x00000000
+
+CAPTURE CALL    YES
+CAPTURE PASS    YES
+HW DONE         YES
+CSI BEFORE      0x00000000
+CSI AFTER       0x00000083
+CSI MODE        0x00000000
+CSI BUF0        0x100017C0
+CSI IRQ EN      0x00000002
+WAIT POLLS      0x00000001
+
+RAM CHANGED     YES
+CHANGED BYTES   0x00001800
+FIRST CHANGE    0x00000000
+LAST CHANGE     0x000017FF
+HASH BEFORE     0x50B995C5
+HASH AFTER      0x8FD97C05
+```
+
+The standalone CSI buffer register contains the expected word-address encoding of the custom capture buffer.
+
+**HW-CONFIRMED:** the transfer changes exactly the complete expected active region, offsets `0x0000..0x17FF`. READY and CSI DONE are therefore no longer the only pass criteria; the full payload range is part of the golden protocol oracle.
+
+### 18.6 0x0A READY semantics
+
+The current minimal fixed-profile runtime preserves the observed FPGA status transition:
+
+```text
+0x0A before READY  0xC0
+0x0A READY state   0xC1
+```
+
+READY must be tested as:
+
+```c
+(fpga_status_0a & 1U) != 0U
+```
+
+The upper bits are configuration fingerprints, not part of the boolean READY condition. Other configuration groups can change the upper-bit profile while leaving the digital acquisition oracle functional.
+
+### 18.7 SMEC/job protocol boundary
+
+The successful standalone path includes `smec_init()`. The custom minimal SMEC path is therefore sufficient for real acquisition through CSI and RAM.
+
+This does **not** establish that SMEC is optional. It establishes that no stock SMEC implementation is required by the supported fixed-profile capture path.
+
+The `0x64..0x6B` protocol should retain its neutral description as an asynchronous FPGA job/service protocol. Runtime and startup evidence shows that later job groups can appear alongside direct FPGA register operations. The exact backend role of every job remains **OPEN**.
+
+### 18.8 Key-like / magic apply sequences
+
+The working `profile_init()` path includes the previously identified key-like values:
+
+```text
+0x5A5555A5
+0xA5AA555A
+0x5A5AA5AA
+0xA5A5AA55
+```
+
+These values are part of the working FPGA profile/apply path and should be treated as protocol landmarks when identifying additional command families.
+
+Their exact meaning is **OPEN**. Current evidence does not justify calling the mechanism cryptographic authentication. Candidate roles include an unlock, apply, commit, or protected-register transaction sequence, but those labels remain interpretations until isolated.
+
+### 18.9 System timer prerequisite relevant to the protocol
+
+The standalone profile initially stalled in `timer_avs_delay_units(2)`. Stock `System_Init` configures an AVS timebase before this primitive is used:
+
+```text
+0x01C20144 |= 0x80000000
+AVS channel 0 divisor = 24000
+AVS channel 1 divisor = 24
+0x01C20C8C = 0x00175DBF
+```
+
+**STATIC-CONFIRMED:** stock setup occurs through `0x40042CD8 -> 0x40042D40 / 0x40042D4C -> 0x40042D54`.
+
+**HW-CONFIRMED:** reproducing this setup allows the custom fixed profile to complete and the acquisition protocol to reach the successful capture described above.
+
+This is a platform timing prerequisite, not a new FPGA selector command.
+
+### 18.10 Superseded implementation guidance
+
+For the supported fixed profile, the following older guidance is now obsolete:
+
+```text
+Reproduce stock 0x400405E0 as the next step.
+Replace stock acquisition-prepare as future work.
+Replace stock per-bank capture as future work.
+The first Custom App milestone is still a CSI smoke test.
+The standalone driver still has stock runtime dependencies around capture.
+```
+
+Those steps are complete in the current custom implementation.
+
+### 18.11 Current golden protocol oracle
+
+Any future protocol change should preserve this result unless the experiment intentionally changes the capture profile:
+
+```text
+FPGA INIT       YES
+SMEC PASS       YES
+PROFILE PASS    YES
+STEPS DONE      0x0000007F
+CAPTURE PASS    YES
+HW DONE         YES
+RAM CHANGED     YES
+CHANGED BYTES   0x00001800
+FIRST CHANGE    0x00000000
+LAST CHANGE     0x000017FF
+```
+
+A result with READY or HW DONE but a shorter changed range is a partial pass, not a successful fixed-profile bulk acquisition.
+
+### 18.12 Next protocol work
+
+The highest-value protocol work is now:
+
+```text
+1. derive APP_STATE +0x640/+0x6F2 for additional profiles instead of using fixed 0x17FA/0x0003
+2. identify additional FPGA selectors used for timebase, trigger, channel and analog/front-end configuration
+3. correlate those selectors with SMEC job IDs and key-like apply/commit sequences
+4. locally verify useful external command-map leads before promoting their names into the driver API
+5. characterize multi-bank and CH1/CH2 capture organization in the fully custom runtime
+6. validate calibration and sample interpretation after raw transport remains stable across profiles
+```
+
+The protocol is therefore no longer blocked on obtaining raw FPGA samples. The active problem is expanding a proven fixed-profile protocol into a general oscilloscope control and acquisition protocol.

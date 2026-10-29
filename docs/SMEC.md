@@ -83,38 +83,123 @@ Therefore a valid FPGA command/control state does **not** imply an active physic
 
 ---
 
-# 3. SMEC_Init reconstruction
+## 3. SMEC_Init reconstruction
 
-## 3.1 Entry and high-level flow
+### 3.1 Confirmed minimal platform prerequisite
 
-**STATIC-CONFIRMED:**
+**HW-CONFIRMED:** DPOSLAB minimal-runtime A/B testing established a
+platform prerequisite that must be satisfied before the stock `FPGA_Start()`
+path can complete.
 
-```text
-SMEC_Init = 0x4004A15C
-```
+The beginning of stock `main()` is:
 
-The function performs the visible sequence:
+    0x40034708  BL 0x4004282C   sys_clock_init(1152000000)
+    0x4003470C  BL 0x40042A60   sys_mmu_init()
+    0x40034710  BL 0x40042D28   System_Init()
+    ...
+    0x40034738  BL 0x40049188   FPGA_Start()
+    ...
+    0x40034750  BL 0x4004A15C   SMEC_Init()
 
-```text
-0x4004A15C
-  -> 0x40068E5C(..., 0x08FC)
-  -> 0x40049F44
-  -> 0x4004A13C
-  -> 0x40049FB8(2000)
-  -> tail 0x40049E30
-```
+DPOSLAB was used to intercept stock execution at `0x40034710`, after
+`sys_clock_init()` and `sys_mmu_init()` but before `System_Init()`.
+This allowed the platform prerequisites to be tested independently of the
+remaining application initialization.
 
-`0x40049E30` is a tail continuation of `SMEC_Init()`, not an unrelated later call.
+The following normal startup operations were excluded from the test:
 
-At a functional level, `SMEC_Init()`:
+    MemoryType setup
+    AllInfoInit
+    SPI flash initialization
+    GetSysSavedInfo
+    LanguageInit
+    GUI initialization
+    touch initialization
+    FAT initialization
+    remaining stock main()
 
-1. performs a low-level/platform initialization call with parameter `0x08FC`;
-2. initializes a 255-entry per-job timing/retry table to decimal `2000`;
-3. writes FPGA selector `0x67 <- 0x08`;
-4. writes the baseline 16-bit SMEC parameter `2000` through selector `0x69`;
-5. submits startup jobs `1..7` through the cached SMEC job engine.
+A hook-only control at `0x40034710` completed successfully, proving that
+stock execution reaches this point after `sys_clock_init()` and
+`sys_mmu_init()` and that the resident DPOSLAB environment remains usable.
 
----
+Static analysis decomposes `System_Init()` as:
+
+    System_Init @ 0x40042D28
+        |
+        +-- BL 0x40042C94     Part 1
+        |
+        `-- B  0x40042CD8     Part 2
+
+Minimal-runtime testing then isolated the two components.
+
+With Part 1 skipped and Part 2 executed:
+
+    sys_clock_init             PASS
+    sys_mmu_init               PASS
+    System_Init Part 1         SKIPPED
+    System_Init Part 2         PASS
+    stock FPGA_Start           PASS
+    stock Job 1                PASS
+    stock Job 2                PASS
+
+The observed stock transaction results were:
+
+    Job 1, index 1, value 20:
+        result66 = 0x01010101
+
+    Job 2, index 2, value 64:
+        result66 = 0x03030303
+
+A direct negative-control build was then produced from this known-good
+configuration. The only functional change was removal of the call to:
+
+    0x40042CD8
+
+With Part 2 disabled, the subsequent stock `FPGA_Start()` path no longer
+completed. The separate hook-only control had already established that
+execution itself reaches the interception point correctly.
+
+**HW-CONFIRMED conclusion:**
+
+    sys_clock_init
+        -> sys_mmu_init
+        -> System_Init Part 2 @ 0x40042CD8
+        -> FPGA_Start
+
+is the current minimum confirmed platform chain for the tested stock
+`FPGA_Start()` path.
+
+`System_Init Part 1 @ 0x40042C94` is not required for this minimal path.
+
+Static analysis of Part 2 shows:
+
+    0x40042CD8
+        -> 0x40042D40
+        -> common implementation 0x40042D54
+
+    0x40042CD8
+        -> 0x40042D4C
+        -> common implementation 0x40042D54
+
+The implementation operates on MMIO registers including:
+
+    0x01C20144
+    0x01C20C8C
+
+and uses the values:
+
+    24000
+    24
+
+**INTERPRETATION:** the structure strongly suggests initialization of two
+timer/timebase resources. At a 24 MHz source clock, the constants are
+consistent with millisecond- and microsecond-scale timebases, but the exact
+peripheral semantics and official function names are not yet confirmed.
+
+This prerequisite is directly relevant to standalone reproduction.
+A standalone `FPGA_Start()` clone should not be considered equivalent to the
+stock startup path unless the required Part 2 platform state has already been
+established.
 
 ## 3.2 Retry/timing table initialization
 
@@ -781,6 +866,13 @@ initialized flags
 startup values {20,64,64,1000,100,950,200}
 three cold boots with identical values
 21/21 source/cache matches across those cold boots
+System_Init Part 2 @ 0x40042CD8 is a prerequisite for the tested minimal
+stock FPGA_Start path
+System_Init Part 1 @ 0x40042C94 is not required for that path
+minimal stock FPGA_Start + Job 1 + Job 2 succeeds without normal
+application initialization
+Job 1 result66 = 0x01010101 in the isolated stock test
+Job 2 result66 = 0x03030303 in the isolated stock test
 ```
 
 **Still open:**
@@ -790,6 +882,10 @@ three cold boots with identical values
 3. whether changing persistent oscilloscope configuration before a cold boot changes any of the seven startup values;
 4. whether `SMEC_Init()` itself activates PE sample output, or whether later `HorizontalInit()` / `VerticalInit()` is also required;
 5. exact identity and electrical topology of the external encryption/security/front-end device behind the FPGA-mediated interface.
+6. exact peripheral/timer identity configured by System_Init Part 2;
+7. whether both Part 2 subpaths 0x40042D40 and 0x40042D4C are individually required;
+8. which exact FPGA_Start subroutine depends on the Part 2 initialization;
+9. whether reproducing Part 2 in the Custom App resolves the current Job 2 failure.
 
 ---
 
@@ -894,8 +990,175 @@ The seven real-device cold-boot values are:
   20, 64, 64, 1000, 100, 950, 200
 ```
 
+A further prerequisite was isolated before `FPGA_Start()` itself:
+`System_Init` Part 2 at `0x40042CD8` is required for the tested minimal
+stock `FPGA_Start()` path to complete, while Part 1 at `0x40042C94` can
+be omitted.
+
+The current minimum confirmed stock chain is therefore:
+
+    sys_clock_init
+      -> sys_mmu_init
+      -> System_Init Part 2
+      -> FPGA_Start
+      -> SMEC startup transactions
+
 Three independent cold boots reproduced these values exactly, with every source field matching the corresponding SMEC cache and every startup initialized flag asserted.
 
 Therefore `SMEC_Init()` should no longer be treated as an unknown black box. Its behavior is sufficiently reconstructed for a careful standalone reproduction on the tested device.
 
 What is **not** proved yet is causality between `SMEC_Init()` and physical sample-stream activation. The next decisive hardware experiment is the A/B/C/D/E PE activity checkpoint across `FPGA_Start`, `SMEC_Init`, `PowerInit`, `HorizontalInit` and `VerticalInit`.
+
+## 15. 2026-10-29 standalone custom SMEC milestone
+
+The earlier open question about whether the reconstructed SMEC path is sufficient for a real acquisition can now be closed for the currently supported fixed profile.
+
+### 15.1 Current code-level implementation
+
+The standalone implementation now uses the project-level names below:
+
+```text
+stock SMEC_Init / required S4 path  -> smec_init()
+SMEC cached/job submission          -> custom SMEC job implementation
+FPGA profile application            -> profile_init()
+acquisition readiness               -> acq_prepare()
+stream + CSI transfer               -> acq_capture()
+```
+
+Historical stock addresses remain useful RE anchors, but current custom-runtime descriptions should prefer these code names where the mapping is established.
+
+### 15.2 Minimal SMEC requirement confirmed by substitution
+
+Hardware substitution testing reduced the stock SMEC startup path to the S4/job path:
+
+```text
+S1  NOT REQUIRED for current fixed-profile digital oracle
+S2  NOT REQUIRED for current fixed-profile digital oracle
+S3  NOT REQUIRED for current fixed-profile digital oracle
+S4  REQUIRED in the tested minimal runtime
+```
+
+The custom S4 implementation completes all seven startup jobs and is sufficient for the current acquisition baseline.
+
+**HW-CONFIRMED:** custom minimal SMEC passes in the standalone runtime and no stock SMEC implementation is executed by the confirmed fixed-profile capture path.
+
+This result does not establish that SMEC itself is optional. The successful standalone path includes `smec_init()`, and the current evidence supports retaining SMEC as part of the FPGA/front-end communication/configuration protocol.
+
+### 15.3 System_Init Part 2 is now identified as AVS timebase initialization
+
+The older description of `System_Init` Part 2 as an unidentified timer/timebase prerequisite can now be made more precise.
+
+Static analysis of stock `System_Init` @ `0x40042D28` established:
+
+```text
+System_Init              0x40042D28
+  Part 1                 0x40042C94
+  Part 2 / AVS init      0x40042CD8
+    channel 0 setup      0x40042D40  divisor 24000
+    channel 1 setup      0x40042D4C  divisor 24
+    common setup         0x40042D54
+```
+
+The common setup sets bit 31 at `0x01C20144` and programs the two 16-bit fields of `0x01C20C8C`:
+
+```text
+0x01C20144 |= 0x80000000
+AVS channel 0 divisor = 24000
+AVS channel 1 divisor = 24
+0x01C20C8C = 0x00175DBF
+```
+
+The stock AVS delay path for counter 0 then clears `0x01C20C84`, sets bit 0 in `0x01C20C80`, and waits until `(counter0 << 1)` reaches the requested delay units.
+
+This behavior matches the custom `timer_avs_delay_units()` implementation. The standalone failure was caused by the missing AVS initialization, not by the delay primitive itself.
+
+**STATIC-CONFIRMED:** Part 2 is the AVS timebase initialization used by the relevant stock delay path.
+
+**HW-CONFIRMED:** after reproducing this AVS setup in the custom timer initialization, `profile_init()` completes all seven fixed-profile steps instead of stalling in `timer_avs_delay_units(2)`.
+
+### 15.4 End-to-end standalone acquisition proof
+
+The complete standalone chain now succeeds:
+
+```text
+custom Timer0 + AVS initialization
+        -> custom FPGA initialization
+        -> smec_init()
+        -> profile_init()
+        -> acq_capture()
+        -> CSI HW DONE
+        -> full 0x1800-byte RAM payload
+```
+
+Hardware result:
+
+```text
+FPGA INIT       YES
+SMEC PASS       YES
+PROFILE PASS    YES
+STEPS DONE      0x0000007F
+FAILED STEP     0x00000000
+
+CAPTURE CALL    YES
+CAPTURE PASS    YES
+HW DONE         YES
+CSI BEFORE      0x00000000
+CSI AFTER       0x00000083
+CSI MODE        0x00000000
+CSI IRQ EN      0x00000002
+WAIT POLLS      0x00000001
+
+RAM CHANGED     YES
+CHANGED BYTES   0x00001800
+FIRST CHANGE    0x00000000
+LAST CHANGE     0x000017FF
+```
+
+**HW-CONFIRMED:** the reconstructed custom SMEC path is sufficient as part of a fully custom fixed-profile acquisition runtime. The proof extends beyond FPGA READY: the CSI transfer completes and exactly the complete expected `0x1800`-byte payload range is updated in RAM.
+
+Consequently, the earlier concern that an unreconstructed portion of stock `SMEC_Init()` might prevent real FPGA sample transfer is no longer supported for this fixed profile.
+
+### 15.5 SMEC and the wider FPGA apply protocol
+
+SMEC should not be considered only an early-startup block. The existing runtime traces show later SMEC job groups interleaved or paired with direct FPGA selector writes. The custom fixed-profile profile path also contains key-like / "magic" FPGA register sequences.
+
+The current evidence therefore supports the following working model:
+
+```text
+SMEC job/service protocol
+        +
+direct FPGA selector/register protocol
+        +
+key-like / apply / commit sequences
+        -> coordinated FPGA/front-end configuration
+```
+
+The exact semantic role of the key-like values remains open. They should not yet be described as cryptographic authentication. They are, however, useful landmarks when reverse engineering additional FPGA commands because similar apply/commit sequences may recur.
+
+### 15.6 Updated open questions
+
+The following questions remain relevant:
+
+- authoritative physical meaning/name of SMEC jobs 1..7;
+- whether the startup values `{20, 64, 64, 1000, 100, 950, 200}` vary with persistent configuration or calibration;
+- exact identity and electrical topology of the external security/front-end device behind the FPGA-mediated interface;
+- semantic meaning of later SMEC job groups and their paired FPGA selectors;
+- semantic meaning of the key-like / magic FPGA apply sequences;
+- whether additional FPGA commands require new SMEC jobs or only direct FPGA protocol operations.
+
+The following older questions are now resolved for the supported fixed profile:
+
+```text
+Can custom SMEC complete the required startup jobs?       YES
+Can the custom runtime complete the profile after SMEC?   YES
+Can the FPGA reach real CSI completion?                   YES
+Can a full sample payload reach RAM?                      YES, 0x1800 bytes
+Is stock SMEC_Init required at runtime?                   NO, custom smec_init() is sufficient
+Was the standalone AVS delay failure a SMEC failure?      NO
+```
+
+### 15.7 Updated bottom line
+
+`SMEC_Init()` is no longer a blocking unknown for the fixed-profile standalone acquisition path. Its required minimal behavior has been reproduced by the custom `smec_init()` path, and that path has now been validated end-to-end through actual FPGA acquisition, CSI completion, and a full `0x1800`-byte RAM transfer.
+
+SMEC should still be treated as a required part of the currently confirmed communication/configuration chain. The evidence does not justify removing it. Future SMEC work should therefore focus on naming and understanding additional job groups and their relationship to direct FPGA commands, rather than on proving the already working startup transport again.
