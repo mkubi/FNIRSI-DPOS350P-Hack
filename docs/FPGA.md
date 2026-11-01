@@ -3521,7 +3521,10 @@ R11 CSI is the confirmed raw-buffer producer.
 Eight logical banks are not eight CSI hardware buffers.
 0x40042C40 / 0x40042C1C clear/set MMIO bit 0, not cache state.
 0x4003F9F8 / 0x4003FA04 change a PE GPIO configuration/direction state.
-Normal runtime directly calls the bank 0..3 capture wrapper.
+Normal runtime chooses the capture path by channel mode:
+  dual      bank 0..3 wrapper = CH1, bank 4..7 wrapper = CH2
+  CH1 only  all eight banks for CH1
+  CH2 only  all eight banks for CH2
 ```
 
 ### Authoritative transport model
@@ -3536,6 +3539,8 @@ FPGA samples: PE0 PCLK, PE2 HSYNC, PE3 VSYNC, PE8..PE15 DATA[7:0]
     -> 0x4004073C uint8 calibration/conversion
     -> uint16 waveform processing
 ```
+
+`0x4004073C` does not start at byte 0 of a bank. It starts at a fixed ring origin of 3 bytes, so the first 3 bytes of every bank are skipped; they probably include the `00 00` seen at the start of the bank-0 dump. Inside one bank the bytes are consecutive samples of one converter lane, one byte per sample, with no header.
 
 ### Authoritative bank layout
 
@@ -3556,7 +3561,19 @@ bank 6  0x42E03E0C
 bank 7  0x42E05F40
 ```
 
-Stock firmware retargets CSI hardware buffer 0 for each logical bank. Wrappers exist for banks `0..3` at `0x400406FC`, banks `4..7` at `0x4004071C`, and banks `0..7` at `0x400406E0`. The normal acquisition runtime calls the `0..3` wrapper. The low/high grouping must not yet be labeled CH1/CH2 or a particular interleave mode.
+Stock firmware retargets CSI hardware buffer 0 for each logical bank. Wrappers exist for banks `0..3` at `0x400406FC`, banks `4..7` at `0x4004071C`, and banks `0..7` at `0x400406DC` (the function starts with a `push` there; `0x400406E0` is its second instruction). The capture path follows the channel mode: in dual mode the `0..3` wrapper captures CH1 and the `4..7` wrapper CH2; a single active channel uses all eight banks.
+
+The waveform is rebuilt by taking one sample from each lane in turn, in a lane order selected by channel mode and sample rate. Output sample slots 0..7 of each group come from:
+
+```text
+1 GSa/s, one channel   banks 5, 1, 4, 0, 7, 3, 6, 2
+dual, CH1              banks 1, 0, 3, 2
+dual, CH2              banks 5, 4, 7, 6
+```
+
+Cross-check: each lane also has a sampling-phase byte whose value is `0xF0` rotated left by the phase step (`F0`=0, `E1`=1, `C3`=2, `87`=3, `0F`=4, `1E`=5, `3C`=6, `78`=7). Sorting the lanes by that step gives the same cycle as the rebuild order in all three tested profiles (1 GSa/s single, 475 MSa/s single, dual). This supports "bank = lane" and "phase byte = sampling phase of that lane".
+
+Each bank slot is 8500 bytes, but the stock code reads at most the per-capture CSI line length (6144 bytes for the 1 GSa/s record; the line length follows the record length). No reader uses the trailing 2356 bytes of a slot: they are padding.
 
 ### Confirmed per-bank primitive
 
