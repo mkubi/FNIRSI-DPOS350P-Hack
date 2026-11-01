@@ -39,6 +39,90 @@ This document separates confirmed findings from open hypotheses.
 - Goodix GT911 touch controller
 - GT911: PG6 SDA, PG7 SCL, PE22 INT, PE24 RESET, address `0x5D`
 
+## Analog and mixed-signal parts (community reports and firmware view)
+
+The parts below come from photos and measurements posted in the EEVblog thread "New oscilloscope from FNIRSI DPOS350P". They were not re-checked on the local unit. Each item names the reply and author so it can be traced. Permalinks use the form `https://www.eevblog.com/forum/testgear/new-oscilloscope-from-fnirsi-dpos350p/msgNNNNNNN/#msgNNNNNNN`.
+
+Some items add what static analysis of the stock firmware (build 2025-06-19) shows about how the part is driven. Those items say so and were not checked on hardware.
+
+Status labels: **marking read** (part number read from the package), **measured**, **likely** (identification from layout or datasheet match, not from a full marking), **firmware** (read in the stock firmware; "probably" marks an inference).
+
+### ADCs
+
+- four dual-channel ADC packages
+- likely MXT2088; the visible marking includes `2445` (pcprogrammer, reply #185, msg5925644)
+- the MXT2088 datasheet shows a dual-input part laid out like the older AD9288 (mawyatt, reply #188, msg5925778)
+- with one channel enabled, all four ADCs appear to receive the signal (wolfy007, reply #183, msg5925540); **firmware:** in single-channel mode the stock code reads all eight raw sample banks for that channel, in dual mode four banks per channel
+- **firmware:** each of the eight banks holds consecutive samples of one converter lane, one byte per sample. The code calibrates gain and offset per lane, keeps a sampling-phase setting per lane, and rebuilds the waveform by interleaving the lanes in an order selected by channel mode and sample rate (details in `docs/FPGA.md`). This fits mawyatt's suggestion of two chips per input with eight clock phases (reply #188)
+- a 125 MHz ADC clock on ADC pins 14 and 47 was requested for measurement to check the interleave phases; no result was posted (pcprogrammer, reply #184, msg5925636)
+- in 250 MHz captures, pcprogrammer reads a slight phase difference between ADC1 and ADC4 (reply #184, from the captures in wolfy007's reply #181)
+
+### ADC reference
+
+Measured by several users:
+
+- the reference reaches the ADCs through analog switches from two sources (Martin Brubaker, reply #456, msg5992415)
+- the stock divider gives about 1.237 V on MXT2088 pins 5 and 7; the datasheet value is 1.18 V (reply #456; reply #596, msg6037511)
+- on the reporting units this made readings about 7% low against a ±2% specification (Martin Brubaker, reply #436, msg5991319)
+- the divider uses 3.3 kOhm 0603 resistors (replies #462 and #481)
+- reported fixes: 33 kOhm soldered across the ground-side 3.3 kOhm resistor gave 1.178 V (Martin Brubaker, replies #462 and #596); BillyO replaced that resistor with 3 kOhm and reported a clear improvement (reply #463); on onefabis's unit 3 kOhm read low and 3.3 kOhm with 51 kOhm in parallel worked better (reply #531, msg6018833)
+- after the change, offsets drifted until autocalibration was run again (reply #456)
+
+Changing this divider changes every vertical reading. Re-run autocalibration afterwards.
+
+### Clock synthesizer
+
+- marking read: `MS5351M` (pcprogrammer, reply #185; wolfy007, reply #186, msg5925672)
+- pcprogrammer expects two clocks to the FPGA: a fixed sampling clock and a variable generator clock (reply #185). **firmware:** confirmed. The stock code programs two outputs, 95 MHz (100 MHz for the 1 GSa/s setting) and 10 MHz; the second output is then re-programmed by the signal generator, so it is probably the generator's sample clock
+- the generator output frequency was measured about 0.02% high on two units (+0.0192% PA2ER, reply #705, msg6118535; +0.0208% BillyO, replies #707 and #722, msg6118977), which points to the reference clock; a third unit was reported about 0.03% off at 10 MHz (KiethWallace, reply #795, msg6163483)
+- **firmware:** the clock driver uses a fixed 25 MHz reference constant and does not set the chip's crystal load capacitance. Scope and generator clocks come from the same chip, so one reference error would shift both by the same fraction. A load-capacitance setting or a per-unit reference correction may remove most of the offset (not tested)
+
+### Generator DAC
+
+- marking read: `MS9714`, 14-bit, 125 MSa/s (pcprogrammer, reply #185)
+- at low generator amplitude, ripple becomes more visible when the DAC package is touched (Ivont, reply #783, msg6132674)
+
+### Offset generation
+
+- the channel offsets and the generator DC offset come from FPGA PWM outputs filtered to DC, not from the DAC (Martin Brubaker, reply #436)
+- the ICs to the right of the FPGA do this PWM-to-DC conversion; the function of a fourth IC there is unknown (Martin Brubaker, reply #561, msg6025809)
+- channel offsets are calibrated by autocalibration; the generator offset is not (reply #456)
+- **firmware:** each channel offset is one 16-bit value sent to the FPGA. Autocalibration searches that value until the mean ADC code reaches two target bands and derives the offset step per code from the two points
+
+### Input stage
+
+- there is no 50 Ohm input option; reflections from the BNC add to the signal, and the front-end gain is not flat (yangyao, reply #211, msg5938958)
+- 270 Ohm resistors were added as a production rework, stacked on existing parts to the right of the FPGA (ststefanov13, reply #553, msg6023261; Martin Brubaker, reply #554, msg6023313); Martin Brubaker guesses this was done to speed up the front ends (reply #561)
+- channel-to-channel skew is a little under 0.7 ns (BillyO, reply #327, msg5948070)
+
+### Front-end control (firmware)
+
+All front-end settings go from the SoC to the FPGA as bus commands, one per channel and setting:
+
+- **V/div (attenuation):** sent only when the range changes; the code then re-sends the offset and waits at least 60 ms before continuing. A wait this long fits mechanical attenuator relays settling (not confirmed on hardware)
+- **bandwidth limit:** three states, full, 150 MHz and 20 MHz
+- **coupling:** a two-state switch, probably AC/DC
+- **offset:** the 16-bit value above
+- **calibration channel select:** set only during system calibration (CH1, then CH2), followed by a 50 ms wait; zero in normal use
+
+The SoC drives no front-end pin directly in this path. So the relay, switch and offset lines are probably FPGA outputs, and a pin hunt can start at the FPGA I/O that change when V/div, coupling or bandwidth change.
+
+### Display connection (firmware)
+
+- the panel is a parallel RGB panel driven by the SoC's LCD timing controller TCON0 (`0x01C0C000`), with the display engine (`0x01000000`) composing the frame; no panel command interface (SPI or I2C) is used at start-up
+- 20 pins of port D, PD1..PD21 except PD12, are set to function 2. Port D is not listed in the V3s manual. Twenty lines fit 16 colour bits (RGB565) plus clock, data enable, HSYNC and VSYNC, but the role of each pin is not confirmed
+- the stock code programs an active area of 1022 x 600, two columns less than the documented 1024; whether two columns are unused is not known
+- dot clock: video PLL 24 MHz x 80 / 4 = 480 MHz, divided by 7 in TCON0, so about 68.6 MHz
+- backlight control is not part of this path
+
+### Still open
+
+- full ADC marking and confirmation of the MXT2088 identification
+- ADC clock frequency and phase per converter, and which MS5351M output feeds the ADCs
+- attenuator topology, relay, analog-switch and amplifier part numbers; stepping V/div while listening for a click or probing coil drivers would identify the relays
+- which FPGA pins drive the ADCs, the DAC, the PWM offset outputs and the front-end relays and switches
+- the role of each display pin on port D
+
 ## Unmarked 8-pin device near the FPGA / SMEC88SP candidate
 
 The previous identification as a Winbond W25N512GV SPI NAND containing the FPGA bitstream is withdrawn. Current evidence instead makes a programmable secure IC in the Sinormous SMEC88 family, specifically an SMEC88SP-class SOP-8 device, the strongest identification candidate. The package has no readable marking, so this remains an evidence-based identification rather than a marking-based confirmation.
