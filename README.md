@@ -139,7 +139,7 @@ When older statements in `docs/FPGA.md` conflict with later explicitly confirmed
 
 ## Analysis workflow
 
-For the analyzed EXE2 image, prefer the repository analysis tools over raw `objdump` output for first-pass function analysis:
+For the analyzed EXE2 image, prefer the companion vander-mello/dpos350p-analysis tools for first-pass static analysis over raw `objdump` output for first-pass function analysis:
 
 ```text
 python -I analysis/disas.py <address> --func
@@ -148,6 +148,19 @@ python -I analysis/find_field_refs.py firmware/exe_load.bin 40544E68:<offset>
 ```
 
 Use `objdump` as a secondary cross-check when needed. Keep firmware-build context attached to absolute addresses because other firmware builds can relocate otherwise equivalent functions and globals.
+
+### Analysis tooling credit
+
+The preferred static-analysis workflow uses the companion
+[`vander-mello/dpos350p-analysis`](https://github.com/vander-mello/dpos350p-analysis)
+toolset, including its Capstone-based `analysis/disas.py` and field-reference
+helpers.
+
+The analysis scripts are maintained by vander-mello and are not part of the
+original FNIRSI-DPOS350P-Hack tooling. This repository uses them extensively
+for function disassembly, fixed-range inspection, and cross-referencing the
+recovered stock state layout. `arm-none-eabi-objdump` remains useful as an
+independent secondary cross-check.
 
 ## Update-container tooling
 
