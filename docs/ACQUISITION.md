@@ -539,3 +539,307 @@ The recommended progression is:
 ```
 
 The project has moved from "can the FPGA stream samples?" to "how do we generalize and interpret a proven sample stream?"
+
+### 22. Stock EXE2 full-acquisition and runtime-sweep reconstruction
+
+**Status:** HW-confirmed stock live acquisition and repeated runtime-sweep baseline  
+**Baseline date:** 2026-11-02  
+**Scope:** stock EXE2 acquisition execution under DPOSLAB after the confirmed stock initialization path. This is a separate reverse-engineering baseline from the standalone custom acquisition path documented above.
+
+The standalone custom path remains valid and unchanged: it proves that stock EXE2 is not required for the fixed-profile single-buffer capture described in sections 2-21. The results below answer a different question: how stock firmware performs its own full acquisition and then advances repeated runtime captures.
+
+#### 22.1 Confirmed stock acquisition entry points
+
+The following stock addresses are now both statically characterized and exercised on hardware:
+
+```text
+0x400413C8  full acquisition entry
+0x400419CC  acquisition dispatcher
+0x4004191C  runtime sweep path
+0x4003C520  runtime rearm/setup
+0x400417E4  one runtime capture step
+0x4003BEB4  runtime state commit/copy
+0x4003C9F4  per-channel processing
+0x4003BF98  runtime counter/progress advance
+0x4003F910  write SYS_INFO+0x6F0 to FPGA selector 0x09
+0x4003F8E0  pulse FPGA selector 0x08: 0 -> 1
+0x40049B08  runtime/event service
+```
+
+The dispatcher at `0x400419CC` selects between the full-acquisition path and the runtime-sweep path using `SYS_INFO+0x28`, subject to the surrounding runtime/event gates.
+
+```text
+SYS_INFO+0x28 == 0  -> 0x40041918 -> 0x400413C8
+SYS_INFO+0x28 != 0  -> 0x4004191C
+```
+
+**STATIC-CONFIRMED:** `0x400413C8` has a real function prologue, takes its working state from `SYS_INFO`, performs the full capture-count loop, and returns normally in the tested stock-initialized DPOSLAB state.
+
+#### 22.2 Native stock CSI ring
+
+Stock acquisition uses the native eight-slot CSI ring:
+
+```text
+RAW_ACQ_BASE     0x42DF76D4
+RAW_BANK_STRIDE  0x2134
+RAW_BANK_COUNT   8
+ACTIVE_PAYLOAD   0x1800 bytes per slot
+```
+
+The CSI destination register stores byte addresses divided by four. Hardware tests therefore observe the DMA position through the encoded CSI buffer address.
+
+**HW-CONFIRMED:** a successful full stock acquisition moves the native DMA position from slot 0 to slot 7 and returns from `0x400413C8`.
+
+#### 22.3 Cache-coherency requirement for stock-ring inspection
+
+Early DPOSLAB stock-ring experiments read the native ring before DMA and then read it again after DMA. That sequence can leave stale sample lines in the Cortex-A7 D-cache and make post-DMA RAM appear unchanged.
+
+The confirmed diagnostic procedure is therefore:
+
+```text
+do not read S0-S7 before acquisition
+run stock acquisition
+invalidate the native payload ranges with DCIMVAC
+DSB + ISB
+read/hash S0-S7 for the first time
+```
+
+No clean operation is performed before the post-DMA read, because cleaning stale CPU cache lines could overwrite newer DMA data.
+
+**HW-CONFIRMED:** with cache-safe inspection and an applied input signal, all eight native slots contain non-zero, changing payloads. The previous all-zero observation must not be treated as proof that the FPGA streamed zero samples.
+
+#### 22.4 Full acquisition is not the repeated-runtime API
+
+Calling `0x400413C8` repeatedly is not equivalent to stock repeated acquisition.
+
+A four-call experiment using repeated direct full-acquisition calls produced non-stock payload patterns such as live/mixed data followed by all-nonzero/all-zero/all-nonzero buffers. Waiting one second between calls did not make the sequence converge or stabilize.
+
+This ruled out a simple passive FPGA warm-up explanation. The missing mechanism was active stock runtime progression between captures.
+
+**HW-CONFIRMED:** `0x400413C8` is valid as the full-acquisition entry, but repeated stock captures must use the runtime state machine rather than repeated isolated calls to the full-acquisition entry.
+
+#### 22.5 FPGA debug/config phase values B8-C0
+
+The observed FPGA selector `0x0A` fingerprint moves from `0xB8` to `0xB9` during the first full acquisition:
+
+```text
+full acquisition:
+FPGA 0x0A  B8 -> B9
+```
+
+Static analysis also found the stock configuration-sync sequence associated with diagnostic phases:
+
+```text
+B9 -> FPGA selector A6
+BA -> FPGA selector A7
+BB -> FPGA selector A8
+BC -> FPGA selector A9
+BD -> FPGA selector AA
+BE -> FPGA selector AB
+BF -> FPGA selector AC
+C0 -> FPGA selector AD
+```
+
+These phase values are conditional configuration-sync landmarks, not a simple acquisition counter. The stock sync path only emits a phase when the current configuration value differs from its cached value.
+
+**HW-CONFIRMED:** calling the stock FPGA runtime-sync wrapper with unchanged configuration leaves the observed phase at `B9`. Therefore `B9` is not by itself evidence that the acquisition state machine is stuck.
+
+#### 22.6 Confirmed runtime rearm and READY behavior
+
+The runtime rearm function is:
+
+```text
+0x4003C520
+    -> 0x4003BEA8
+    -> 0x4003B7B8
+    -> 0x40024E14
+    -> 0x4003C008
+    -> 0x4003442C
+    -> 0x4003F910
+    -> 0x4003FA10
+    -> 0x4003F8E0
+```
+
+This path initializes runtime counters/state, writes the current `SYS_INFO+0x6F0` value through FPGA selector `0x09`, performs the stock trigger/rearm sequence, and pulses selector `0x08` from 0 to 1.
+
+Runtime readiness is read from FPGA selector `0x0B`:
+
+```text
+0x4003F8B8:
+    read FPGA selector 0x0B
+    SYS_INFO+0x6EE = value & 1
+```
+
+In the confirmed DPOSLAB runtime test:
+
+```text
+before runtime rearm: FPGA 0x0B = B8   bit0 = 0
+ after runtime rearm: FPGA 0x0B = B9   bit0 = 1
+READY polls: 1
+READY elapsed time: 0 ms
+```
+
+**HW-CONFIRMED:** runtime READY is immediate after the stock rearm in the tested state. The acquisition problem is therefore not a requirement for passive one-second or multi-second FPGA settling.
+
+#### 22.7 One confirmed stock runtime iteration
+
+After one full acquisition and one runtime rearm, the following sequence runs successfully on hardware:
+
+```text
+0x400417E4  runtime capture
+0x4003BEB4  commit/copy state
+0x4003C9F4  per-channel processing
+0x4003BF98  advance runtime counters
+0x4003F910  write selector 0x09
+0x4003F8E0  pulse selector 0x08
+0x40049B08  runtime/event service
+```
+
+The runtime capture `0x400417E4` first polls `FPGA 0x0B` through `0x4003F8B8`, then performs the stock CH1/CH2 capture and copy path. In the tested CH1-only state, the function returns normally and updates `SYS_INFO+0x6EE` from 0 to 1.
+
+A complete D0.4B iteration reached its final diagnostic stage without hanging.
+
+**HW-CONFIRMED:** the sequence above is a valid one-step stock runtime acquisition path in the current stock-initialized DPOSLAB environment.
+
+#### 22.8 Runtime counter structure at SYS_INFO+0x6F0
+
+Static analysis of `0x4003BF98` shows that the function uses `SYS_INFO+0x6F0` as the base of a runtime sweep structure. Important fields include:
+
+```text
++0x6F0  16-bit value subsequently written to FPGA selector 0x09
++0x6F6  16-bit per-step increment used by the runtime advance
++0x6F8  16-bit coarse-progress increment
++0x6FC  32-bit fine/current progress value
++0x700  32-bit coarse runtime progress
++0x708  32-bit threshold compared against +0x6FC
+```
+
+The important control flow is conceptually:
+
+```text
+if (+0x6FC >= +0x708) {
+    +0x700 += +0x6F8;
+    related accumulated position += +0x6F8;
+}
+
++0x6FC += +0x6F6;
+quotient  = +0x6FC / SYS_INFO+0x1B1
+remainder = +0x6FC % SYS_INFO+0x1B1
+SYS_INFO+0x63C = quotient
+SYS_INFO+0x6F0 += quotient
+```
+
+The exact semantic names of these fields remain open, but their arithmetic and runtime role are confirmed by static analysis and hardware progression.
+
+#### 22.9 Five-cycle HW-confirmed runtime progression
+
+D0.4C executes one full acquisition, one initial runtime rearm, then five bounded runtime cycles using the complete sequence from section 22.7.
+
+The experiment completed all five cycles:
+
+```text
+STAGE = 0xFF
+DONE  = 5
+```
+
+Observed progression through the first four visible runtime cycles:
+
+```text
+state       SYS+6F0   SYS+6FC   SYS+700
+----------------------------------------
+FULL           02        00         00
+INITIAL REARM  08        00         00
+C1 after adv   0E        32         00
+C2 after adv   14        64         00
+C3 after adv   1A        96         01
+C4 after adv   21        C8         02
+```
+
+Every visible runtime cycle reported:
+
+```text
+READY = 1
+polls = 1
+elapsed = 0 ms
+FPGA 0x0A = B9
+FPGA 0x0B = B9
+```
+
+Runtime ring fingerprints were non-zero and changed between captures. The old pathological `FF / 00 / FF` behavior arose when the full-acquisition entry was incorrectly repeated without the runtime advance/rearm sequence.
+
+**HW-CONFIRMED:** repeated stock acquisition is stable when driven through the reconstructed runtime state machine. Time alone is not the missing prerequisite; active runtime counter advance and rearm are required.
+
+#### 22.10 Updated stock runtime model
+
+The current best-supported stock model is:
+
+```text
+FULL START
+0x400413C8
+    |
+    +-> native 8-slot CSI acquisition
+    +-> FPGA 0x0A B8 -> B9
+    |
+    v
+RUNTIME REARM
+0x4003C520
+    |
+    +-> runtime counter initialization
+    +-> selector 0x09 update
+    +-> stock trigger/rearm sequence
+    +-> selector 0x08 pulse
+    +-> FPGA 0x0B bit0 becomes READY
+    |
+    v
+RUNTIME ITERATION
+0x400417E4  capture
+0x4003BEB4  commit
+0x4003C9F4  process
+0x4003BF98  advance counters/progress
+0x4003F910  write selector 0x09
+0x4003F8E0  pulse selector 0x08
+0x40049B08  service
+    |
+    +---------- repeat ----------+
+```
+
+This model is based on both static call-graph reconstruction and hardware execution. It replaces the earlier working assumption that repeated acquisition could be reproduced by repeatedly invoking `0x400413C8`.
+
+#### 22.11 Current acceptance criteria for stock-runtime experiments
+
+For stock-runtime reconstruction, use a stricter acceptance hierarchy than READY or CSI DONE alone:
+
+```text
+1. full acquisition returns
+2. native CSI DMA reaches slot 7
+3. cache-safe native-ring inspection produces a valid payload fingerprint
+4. runtime rearm returns
+5. FPGA selector 0x0B bit0 reports READY
+6. runtime capture returns
+7. commit/process/advance all return
+8. SYS_INFO+0x6F0/+0x6FC/+0x700 advance consistently
+9. selector 0x09 + selector 0x08 rearm the next runtime cycle
+10. multiple consecutive runtime cycles complete with non-zero changing payloads
+```
+
+Do not use repeated direct calls to `0x400413C8` as an acceptance test for repeated stock acquisition.
+
+#### 22.12 Next stock-runtime RE target
+
+The next static-analysis target is the `SYS_INFO+0x6F0..+0x708` runtime structure. In particular:
+
+```text
++0x6F6  per-step increment
++0x6F8  coarse-progress increment
++0x708  threshold for incrementing +0x700
+```
+
+The goal is to explain mathematically the observed hardware progression:
+
+```text
++0x6F0: 08 -> 0E -> 14 -> 1A -> 21 -> ...
++0x6FC: 00 -> 32 -> 64 -> 96 -> C8 -> ...
++0x700: 00 -> 00 -> 00 -> 01 -> 02 -> ...
+```
+
+Only after this state machine is understood should the stock runtime path be reduced further or translated into custom driver-level abstractions.

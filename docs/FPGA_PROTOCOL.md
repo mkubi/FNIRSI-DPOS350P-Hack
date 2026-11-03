@@ -1,8 +1,8 @@
 # FNIRSI DPOS350P ARM-to-FPGA Protocol
 
-> **Status:** Working implementation reference
-> **Target firmware build:** `8eeb56ba0086` / FNIRSI update dated 2025-06-19
-> **Last updated:** 2026-10-28
+> **Status:** Working implementation reference  
+> **Target firmware build:** `8eeb56ba0086` / FNIRSI update dated 2025-06-19  
+> **Last updated:** 2026-10-28  
 > **Companion evidence record:** `docs/FPGA.md`
 
 This document is the concise implementation reference for the DPOS350P ARM-to-FPGA interface. It records what a driver or standalone acquisition application can rely on today. Investigation history, disassembly notes, failed experiments, call graphs, and competing hypotheses belong in `docs/FPGA.md`.
@@ -10,6 +10,442 @@ This document is the concise implementation reference for the DPOS350P ARM-to-FP
 The command numbers used by older FNIRSI instruments must not be copied into the DPOS350P driver without local confirmation. The DPOS350P uses a related eight-bit FPGA interface, but sample transfer and several command meanings differ from the FNIRSI-1013D/1014D generation.
 
 ---
+# Command List
+
+This section contains hardware-confirmed FPGA/SMEC command sequences
+reconstructed from stock runtime traces.
+
+The sequences are intended as a practical reference for stock-like
+custom implementations.
+
+## Vertical frontend protocol
+
+### Channel routing
+
+=========================
+
+SET CHANNEL STATE
+Evidence: HW-CONFIRMED
+
+SELECT  0x2E
+WRITE   0x<CHANNEL STATE>
+DELAY   50 ms
+
+CHANNEL STATE
+
+0x02 = CH1 OFF, CH2 ON or OFF
+0x01 = CH1 ON,  CH2 OFF
+0x00 = CH1 ON,  CH2 ON
+
+=========================
+
+### CH2 enable with CH1 disabled
+=========================
+
+SET CH2 = ON WITH CH1 OFF
+Evidence: HW-CONFIRMED
+Observed from: CH1=OFF, CH2=OFF -> CH1=OFF, CH2=ON
+
+No SELECT 0x2E observed.
+
+JOB     0x12 = 0x000010AA
+JOB     0x13 = 0xFFFEF856
+COMMIT  0xB8 = 0x00000000
+
+=========================
+
+### Bandwidth control
+
+=========================
+
+SET CH1 BANDWIDTH
+Evidence: HW-CONFIRMED
+
+SELECT  0x29
+WRITE   0x<CH1 BANDWIDTH>
+
+CH1 BANDWIDTH
+
+0x00 = 350 MHz
+0x01 = 150 MHz
+0x02 = 20 MHz
+
+=========================
+
+SET CH2 BANDWIDTH
+Evidence: HW-CONFIRMED
+
+SELECT  0x2C
+WRITE   0x<CH2 BANDWIDTH>
+
+CH2 BANDWIDTH
+
+0x00 = 350 MHz
+0x01 = 150 MHz
+0x02 = 20 MHz
+
+=========================
+
+NOTE:
+
+When both channels are enabled, the effective bandwidth must be
+limited to a maximum of 150 MHz.
+
+350 MHz requested -> 150 MHz effective
+150 MHz requested -> 150 MHz effective
+ 20 MHz requested ->  20 MHz effective
+
+The effective bandwidth is applied independently through
+0x29 (CH1) and 0x2C (CH2).
+
+
+=========================
+=========================
+CH1 VERTICAL PROFILES
+=========================
+=========================
+
+20 V/div
+
+SELECT  0x28
+WRITE   0x00
+
+JOB     0x08 = 0x000012EF
+JOB     0x0A = 0x00514930
+COMMIT  0xB5 = 0x00000000
+
+=========================
+
+10 V/div
+
+SELECT  0x28
+WRITE   0x01
+
+JOB     0x08 = 0x000012EB
+JOB     0x0A = 0x004F4CE4
+COMMIT  0xB5 = 0x00000000
+
+=========================
+
+5 V/div
+
+SELECT  0x28
+WRITE   0x02
+
+JOB     0x08 = 0x00001358
+JOB     0x0A = 0x004B573A
+COMMIT  0xB5 = 0x00000000
+
+=========================
+
+2 V/div
+
+SELECT  0x28
+WRITE   0x03
+
+JOB     0x08 = 0x00001354
+JOB     0x0A = 0x00429AEA
+COMMIT  0xB5 = 0x00000000
+
+=========================
+
+1 V/div
+
+SELECT  0x28
+WRITE   0x04
+
+JOB     0x08 = 0x0000130D
+JOB     0x0A = 0x003D24A8
+COMMIT  0xB5 = 0x00000000
+
+=========================
+
+500 mV/div
+
+SELECT  0x28
+WRITE   0x05
+
+JOB     0x08 = 0x00001387
+JOB     0x0A = 0x00546992
+COMMIT  0xB5 = 0x00000000
+
+=========================
+
+200 mV/div
+
+SELECT  0x28
+WRITE   0x06
+
+JOB     0x08 = 0x000012D9
+JOB     0x0A = 0x00514901
+COMMIT  0xB5 = 0x00000000
+
+=========================
+
+100 mV/div
+
+SELECT  0x28
+WRITE   0x07
+
+JOB     0x08 = 0x000012D6
+JOB     0x0A = 0x004F4C94
+COMMIT  0xB5 = 0x00000000
+
+=========================
+
+50 mV/div
+
+SELECT  0x28
+WRITE   0x08
+
+JOB     0x08 = 0x00001358
+JOB     0x0A = 0x004B598C
+COMMIT  0xB5 = 0x00000000
+
+=========================
+
+20 mV/div
+
+SELECT  0x28
+WRITE   0x09
+
+JOB     0x08 = 0x0000136A
+JOB     0x0A = 0x00429B26
+COMMIT  0xB5 = 0x00000000
+
+=========================
+
+10 mV/div
+
+SELECT  0x28
+WRITE   0x0A
+
+JOB     0x08 = 0x0000130D
+JOB     0x0A = 0x003D28A8
+COMMIT  0xB5 = 0x00000000
+
+=========================
+
+5 mV/div
+
+SELECT  0x28
+WRITE   0x0B
+
+JOB     0x08 = 0x000013C0
+JOB     0x0A = 0x00545D63
+COMMIT  0xB5 = 0x00000000
+
+=========================
+
+2 mV/div
+
+SELECT  0x28
+WRITE   0x0B
+
+; Physical frontend range unchanged from 5 mV/div.
+; No JOB 0x08 / 0x0A / COMMIT 0xB5 transition observed.
+
+JOB     0x0E = 0x00000050
+COMMIT  0xB8 = 0x00000000
+
+=========================
+=========================
+CH2 VERTICAL PROFILES
+=========================
+=========================
+CH2 20 V/div
+
+SELECT  0x2B
+WRITE   0x00
+
+JOB     0x09 = 0x000012EB
+JOB     0x0B = 0x00512542
+COMMIT  0xB6 = 0x00000000
+
+=========================
+CH2 10 V/div
+
+SELECT  0x2B
+WRITE   0x01
+
+JOB     0x09 = 0x000012E9
+JOB     0x0B = 0x004F23DA
+COMMIT  0xB6 = 0x00000000
+
+=========================
+CH2 5 V/div
+
+SELECT  0x2B
+WRITE   0x02
+
+JOB     0x09 = 0x0000134F
+JOB     0x0B = 0x004B3BF5
+COMMIT  0xB6 = 0x00000000
+
+=========================
+CH2 2 V/div
+
+SELECT  0x2B
+WRITE   0x03
+
+JOB     0x09 = 0x00001351
+JOB     0x0B = 0x00428DF6
+COMMIT  0xB6 = 0x00000000
+
+=========================
+CH2 1 V/div
+
+SELECT  0x2B
+WRITE   0x04
+
+JOB     0x09 = 0x00001315
+JOB     0x0B = 0x003D550E
+COMMIT  0xB6 = 0x00000000
+
+=========================
+CH2 500 mV/div
+
+SELECT  0x2B
+WRITE   0x05
+
+JOB     0x09 = 0x00001387
+JOB     0x0B = 0x00546992
+COMMIT  0xB6 = 0x00000000
+
+=========================
+CH2 Vertical 200 mV/div
+
+SELECT  0x2B
+WRITE   0x06
+
+JOB     0x09 = 0x000012D5
+JOB     0x0B = 0x005125D0
+COMMIT  0xB6 = 0x00000000
+
+=========================
+100 mV/div
+
+SELECT  0x2B
+WRITE   0x07
+
+JOB     0x09 = 0x000012D4
+JOB     0x0B = 0x004F2357
+COMMIT  0xB6 = 0x00000000
+
+=========================
+50 mV/div
+
+SELECT  0x2B
+WRITE   0x08
+
+JOB     0x09 = 0x00001350
+JOB     0x0B = 0x004B3C3C
+COMMIT  0xB6 = 0x00000000
+
+=========================
+20 mV/div
+
+SELECT  0x2B
+WRITE   0x09
+
+JOB     0x09 = 0x00001368
+JOB     0x0B = 0x00428E43
+COMMIT  0xB6 = 0x00000000
+
+=========================
+10 mV/div
+
+SELECT  0x2B
+WRITE   0x0A
+
+JOB     0x09 = 0x00001315
+JOB     0x0B = 0x003D5AC8
+COMMIT  0xB6 = 0x00000000
+
+=========================
+5 mV/div
+
+SELECT  0x2B
+WRITE   0x0B
+
+JOB     0x09 = 0x000013AC
+JOB     0x0B = 0x0055764F
+COMMIT  0xB6 = 0x00000000
+
+=========================
+2 mV/div
+
+SELECT  0x2B
+WRITE   0x0B
+; Physical frontend range unchanged from 5 mV/div.
+
+No JOB 0x09
+No JOB 0x0B
+No COMMIT 0xB6
+
+JOB     0x0E = 0x00000050
+COMMIT  0xB8 = 0x00000000
+
+=========================
+
+
+## Horizontal / timebase protocol
+
+### Horizontal profiles
+
+=========================
+
+SET HORIZONTAL M = 10 us/div
+Evidence: HW-CONFIRMED
+Observed from: M=20 us/div -> M=10 us/div
+
+JOB     0x21 = 0x0000003E
+COMMIT  0xC1 = 0x00000000
+
+JOB     0x23 = 0x0000003F
+COMMIT  0xC3 = 0x00000000
+
+JOB     0x1C = 0x000000C3
+COMMIT  0xBC = 0x00000000
+
+JOB     0x20 = 0x000000E1
+COMMIT  0xC0 = 0x00000000
+
+JOB     0x12 = 0x00001013
+JOB     0x13 = 0x00003994
+COMMIT  0xB8 = 0x00000000
+
+=========================
+
+
+
+---
+
+### CHANNEL / RELAY OBSERVATION
+
+CH1 ON:
+    CH2 OFF -> ON    relay CLICK
+    CH2 ON  -> OFF   relay CLICK
+
+CH1 OFF:
+    CH2 OFF -> ON    SILENT
+    CH2 ON  -> OFF   SILENT
+
+STATUS:
+    HW-CONFIRMED
+
+CONCLUSION:
+    Relay activity depends on combined CH1/CH2 frontend state.
+
+    Relay click is NOT a reliable direct indicator
+    of one channel's enable/disable command.
+
+OPEN:
+    Exact physical function of the relay/routing change.
+    Exact FPGA command implementing CH1 enable.
+    Exact FPGA command implementing CH2 enable.
+    
+--- 
 
 ## 1. Evidence labels
 
@@ -499,7 +935,88 @@ The gaps likely represent other startup work, delays, or dependencies between jo
 
 ---
 
-## 8. Confirmed waveform-drag job sequence
+## 8. Runtime protocol command experiments
+
+This section records controlled stock-runtime setting changes as protocol commands. Unlike the startup sequence, each experiment changes one user-visible setting while the stock oscilloscope is already running. Values are retained exactly as observed; semantic names are promoted only where the causal relation is hardware-confirmed.
+
+### 8.1 RT-T1: CH1 ON -> OFF
+
+**Experiment status: INCONCLUSIVE for exact command sequence.**
+
+Initial stock profile:
+
+```text
+CH1        ON
+CH2        OFF
+CH1 V/div  200 mV/div
+Coupling   DC
+Probe      1X
+Bandwidth  350 MHz / FULL
+Horizontal M = 20 us/div
+```
+
+User action:
+
+```text
+CH1 ON -> OFF
+```
+
+**HW-CONFIRMED:** The channel transition causes a mechanical frontend relay operation. DPOSDBG trace-format-v6 primitive hooks and screenshot-triggered export operated correctly.
+
+The first raw capture was not sufficient to identify the exact CH1 OFF command burst because repeated selector `0x65` polling filled and wrapped the 768-record ring before the Screenshot export. The retained tail showed the end of an asynchronous job transaction, including repeated `0x65 = 0x18`, final READY `0x65 = 0x19`, and `0x68/0x67/0x66` values associated with state `0xB7`.
+
+Therefore:
+
+- **HW-CONFIRMED:** CH1 ON/OFF is mechanically relay-relevant.
+- **OPEN:** The exact FPGA selector/job sequence implementing CH1 OFF.
+- **OPEN:** Whether CH1 OFF uses the G2.6 vertical path, a dedicated channel-state selector, or another per-channel helper.
+- Selector `0x28` must **not** yet be documented as CH1 enable/disable.
+
+### 8.2 RT-T2: horizontal M=20 us/div -> M=10 us/div
+
+**HW-CONFIRMED:** A single stock-runtime horizontal timebase change from `20 us/div` to `10 us/div` invoked the asynchronous FPGA job engine. The runtime burst was clearly separated from startup traffic by `tick_ms ~= 5631`, `run_count = 67`, `RUN`.
+
+Observed runtime job/commit sequence:
+
+```text
+JOB 0x21 = 0x0000003E
+COMMIT 0xC1 = 0x00000000
+
+JOB 0x23 = 0x0000003F
+COMMIT 0xC3 = 0x00000000
+
+JOB 0x1C = 0x000000C3
+COMMIT 0xBC = 0x00000000
+
+JOB 0x20 = 0x000000E1
+COMMIT 0xC0 = 0x00000000
+
+JOB 0x12 = 0x00001013
+JOB 0x13 = 0x00003994
+COMMIT 0xB8 = 0x00000000
+```
+
+All transactions use the confirmed `0x64..0x6B` asynchronous framing described in section 6.
+
+Consequences:
+
+- **HW-CONFIRMED:** Runtime horizontal reconfiguration uses the FPGA job engine.
+- **HW-CONFIRMED:** Commit `0xB8` participates in runtime horizontal/acquisition reconfiguration.
+- **INFERRED:** The `B8` phase is a common acquisition/timing apply stage rather than a direct channel-enable stage.
+- **OPEN:** Exact semantic units of job values `0x00001013` and `0x00003994`.
+- No direct frontend selectors `0x28..0x30` were present in the currently covered DPOSDBG call-site trace for this horizontal-only change, which is consistent with but does not by itself prove their vertical/frontend roles.
+
+### 8.3 Experiment naming
+
+Use sequential runtime experiment IDs so traces can be compared without mixing startup and runtime evidence:
+
+```text
+RT-T1  CH1 ON -> OFF
+RT-T2  M=20 us/div -> M=10 us/div
+RT-T3  reserved for the next single-variable frontend experiment
+```
+
+## 10. Confirmed waveform-drag job sequence
 
 ### 8.1 UI causality
 
@@ -623,7 +1140,7 @@ X, 0, X, X, 0
 
 **HW-CONFIRMED:** During continuous dragging, one five-job block is normally generated approximately every 60 ms and correlates with one increment of the stock main-loop run_count.
 
-## 9. What the job protocol is and is not
+## 10. What the job protocol is and is not
 
 ### Confirmed
 
@@ -659,7 +1176,7 @@ state/result returned to ARM
 
 ---
 
-## 10. CSI sample transport
+## 11. CSI sample transport
 
 The DPOS350P does not transfer its bulk waveform samples through repeated reads of the eight-bit control bus. Samples are streamed from the FPGA into DRAM through the R11 CSI1 peripheral.
 
@@ -757,7 +1274,7 @@ Consequences for a standalone driver:
 
 ---
 
-## 11. Acquisition status and control: current boundary
+## 12. Acquisition status and control: current boundary
 
 The following are established:
 
@@ -784,7 +1301,7 @@ Current evidence does **not** support blindly copying all 50 startup jobs into t
 
 ---
 
-## 12. Recommended driver architecture
+## 13. Recommended driver architecture
 
 ### 12.1 Physical bus layer
 
@@ -870,7 +1387,7 @@ Responsibilities:
 
 ---
 
-## 13. First standalone acquisition milestone
+## 14. First standalone acquisition milestone
 
 The first Custom App milestone is deliberately smaller than a complete oscilloscope driver.
 
@@ -907,7 +1424,7 @@ A recognizable calibrated waveform is not required for the first proof. Initial 
 
 ---
 
-## 14. Safe-test rules
+## 15. Safe-test rules
 
 ```text
 Always use finite timeouts.
@@ -923,7 +1440,7 @@ Do not promote an inferred command name to the driver API without evidence.
 
 ---
 
-## 15. Next protocol experiments
+## 16. Next protocol experiments
 
 Priority order:
 
@@ -939,7 +1456,7 @@ The `0x64..0x6B` job protocol is sufficiently documented for a generic helper. T
 
 ---
 
-## 16. Relationship to older FNIRSI protocols
+## 17. Relationship to older FNIRSI protocols
 
 The FNIRSI-1013D/1014D family documents a similar eight-bit FPGA control bus and a `0x64..0x6E` parameter-chip command family. This is useful as architectural precedent only.
 
@@ -954,7 +1471,7 @@ Use the older protocol to generate hypotheses, never as direct DPOS350P implemen
 
 ---
 
-## 17. Maintenance rule
+## 18. Maintenance rule
 
 When a new finding is made:
 
@@ -965,243 +1482,3 @@ When a new finding is made:
 5. If evidence changes, preserve the history in `docs/FPGA.md` and correct this file without retaining obsolete implementation guidance.
 
 This separation keeps the complete reverse-engineering record while giving the Custom App a concise, reliable specification.
-
-## 18. Standalone protocol baseline (2026-10-29)
-
-This section supersedes the implementation-status and "first standalone acquisition" guidance in sections 11, 13, and 15 for the currently supported fixed profile. The earlier sections remain useful for provenance and protocol history.
-
-### 18.1 End-to-end status
-
-The ARM-to-FPGA protocol is now exercised successfully by `apps/acq_test` without executing the stock EXE2 acquisition runtime.
-
-Current standalone path:
-
-```text
-custom Timer0 + AVS initialization
-        -> fpga_init()
-        -> smec_init()
-        -> profile_init()
-        -> acq_capture()
-        -> CSI HW completion
-        -> full 0x1800-byte RAM payload
-```
-
-**HW-CONFIRMED:** the custom protocol implementation is sufficient for a real fixed-profile FPGA capture, not merely for FPGA ID, READY, or CSI register setup.
-
-### 18.2 Current implementation names
-
-Use the current project names where the behavior is known:
-
-```text
-physical PE bus                         fpga_bus_*()
-FPGA selector/register protocol         fpga_protocol_*()
-FPGA + CSI + clock initialization       fpga_init()
-minimal startup job/service path        smec_init()
-fixed-profile apply                     profile_init()
-acquisition READY preparation           acq_prepare()
-stream geometry + quantity              acq_configure_stream()
-single capture                          acq_capture()
-CSI receiver                            r11_csi_*()
-```
-
-The old proposed `dpos_fpga.*` / `dpos_acq.*` names in section 12 are historical design guidance. The implemented driver split is now `fpga_bus`, `fpga_protocol`, `fpga_init`, `smec`, `profile`, `acq`, and `r11_csi`.
-
-### 18.3 Fixed-profile stream contract
-
-The currently supported profile has:
-
-```text
-A = APP_STATE +0x640 = 0x17FA
-B = APP_STATE +0x6F2 = 0x0003
-
-CSI geometry  = A + 2*B       = 0x1800
-FPGA quantity = 20 + 2*(A+B)  = 0x300E
-```
-
-The custom implementation applies the downstream protocol as:
-
-```text
-r11_csi_configure_fixed_stream_geometry()
-fpga_protocol_stream_set_quantity(0x300E)
-```
-
-**STATIC-CONFIRMED + HW-CONFIRMED:** FPGA selector `0x22` is the FPGA-side stream-quantity control paired with CSI receiver geometry. For the fixed profile, `0x22 <- 0x300E` together with CSI geometry `0x1800` produces the complete contiguous `0x1800`-byte transfer.
-
-The semantic unit of `0x300E` remains **OPEN**. It must not be renamed to a byte-count field.
-
-### 18.4 Acquisition protocol implemented by acq.c
-
-The custom capture path now implements the required per-capture protocol without stock helpers:
-
-```text
-configure CSI geometry
-FPGA selector 0x22 <- stream quantity
-prepare cyclic position
-select capture bank
-switch shared PE interface to CSI mode
-program CSI buffer 0
-ACK stale CSI DONE
-Timer0 gate/transition required by stock sequence
-CSI capture enable
-FPGA capture gate assert
-bounded poll for CSI DONE
-FPGA capture gate release
-restore Timer0 gate/state
-ACK CSI DONE
-CSI capture disable
-restore shared PE interface to GPIO control mode
-```
-
-The current driver APIs are:
-
-```c
-int acq_prepare(
-    uint8_t mode,
-    uint32_t max_polls,
-    struct acq_prepare_result *result);
-
-int acq_capture(
-    uintptr_t buffer,
-    uint16_t position,
-    uint8_t bank,
-    uint32_t timeout_iterations,
-    struct acq_capture_result *result);
-```
-
-**HW-CONFIRMED:** this custom path replaces the capture roles previously performed by stock `0x4003FA10`, `0x400405E0`, and `0x400406C8` in the fixed-profile acquisition oracle.
-
-### 18.5 Hardware result
-
-```text
-FPGA INIT       YES
-SMEC PASS       YES
-PROFILE PASS    YES
-STEPS DONE      0x0000007F
-FAILED STEP     0x00000000
-
-CAPTURE CALL    YES
-CAPTURE PASS    YES
-HW DONE         YES
-CSI BEFORE      0x00000000
-CSI AFTER       0x00000083
-CSI MODE        0x00000000
-CSI BUF0        0x100017C0
-CSI IRQ EN      0x00000002
-WAIT POLLS      0x00000001
-
-RAM CHANGED     YES
-CHANGED BYTES   0x00001800
-FIRST CHANGE    0x00000000
-LAST CHANGE     0x000017FF
-HASH BEFORE     0x50B995C5
-HASH AFTER      0x8FD97C05
-```
-
-The standalone CSI buffer register contains the expected word-address encoding of the custom capture buffer.
-
-**HW-CONFIRMED:** the transfer changes exactly the complete expected active region, offsets `0x0000..0x17FF`. READY and CSI DONE are therefore no longer the only pass criteria; the full payload range is part of the golden protocol oracle.
-
-### 18.6 0x0A READY semantics
-
-The current minimal fixed-profile runtime preserves the observed FPGA status transition:
-
-```text
-0x0A before READY  0xC0
-0x0A READY state   0xC1
-```
-
-READY must be tested as:
-
-```c
-(fpga_status_0a & 1U) != 0U
-```
-
-The upper bits are configuration fingerprints, not part of the boolean READY condition. Other configuration groups can change the upper-bit profile while leaving the digital acquisition oracle functional.
-
-### 18.7 SMEC/job protocol boundary
-
-The successful standalone path includes `smec_init()`. The custom minimal SMEC path is therefore sufficient for real acquisition through CSI and RAM.
-
-This does **not** establish that SMEC is optional. It establishes that no stock SMEC implementation is required by the supported fixed-profile capture path.
-
-The `0x64..0x6B` protocol should retain its neutral description as an asynchronous FPGA job/service protocol. Runtime and startup evidence shows that later job groups can appear alongside direct FPGA register operations. The exact backend role of every job remains **OPEN**.
-
-### 18.8 Key-like / magic apply sequences
-
-The working `profile_init()` path includes the previously identified key-like values:
-
-```text
-0x5A5555A5
-0xA5AA555A
-0x5A5AA5AA
-0xA5A5AA55
-```
-
-These values are part of the working FPGA profile/apply path and should be treated as protocol landmarks when identifying additional command families.
-
-Their exact meaning is **OPEN**. Current evidence does not justify calling the mechanism cryptographic authentication. Candidate roles include an unlock, apply, commit, or protected-register transaction sequence, but those labels remain interpretations until isolated.
-
-### 18.9 System timer prerequisite relevant to the protocol
-
-The standalone profile initially stalled in `timer_avs_delay_units(2)`. Stock `System_Init` configures an AVS timebase before this primitive is used:
-
-```text
-0x01C20144 |= 0x80000000
-AVS channel 0 divisor = 24000
-AVS channel 1 divisor = 24
-0x01C20C8C = 0x00175DBF
-```
-
-**STATIC-CONFIRMED:** stock setup occurs through `0x40042CD8 -> 0x40042D40 / 0x40042D4C -> 0x40042D54`.
-
-**HW-CONFIRMED:** reproducing this setup allows the custom fixed profile to complete and the acquisition protocol to reach the successful capture described above.
-
-This is a platform timing prerequisite, not a new FPGA selector command.
-
-### 18.10 Superseded implementation guidance
-
-For the supported fixed profile, the following older guidance is now obsolete:
-
-```text
-Reproduce stock 0x400405E0 as the next step.
-Replace stock acquisition-prepare as future work.
-Replace stock per-bank capture as future work.
-The first Custom App milestone is still a CSI smoke test.
-The standalone driver still has stock runtime dependencies around capture.
-```
-
-Those steps are complete in the current custom implementation.
-
-### 18.11 Current golden protocol oracle
-
-Any future protocol change should preserve this result unless the experiment intentionally changes the capture profile:
-
-```text
-FPGA INIT       YES
-SMEC PASS       YES
-PROFILE PASS    YES
-STEPS DONE      0x0000007F
-CAPTURE PASS    YES
-HW DONE         YES
-RAM CHANGED     YES
-CHANGED BYTES   0x00001800
-FIRST CHANGE    0x00000000
-LAST CHANGE     0x000017FF
-```
-
-A result with READY or HW DONE but a shorter changed range is a partial pass, not a successful fixed-profile bulk acquisition.
-
-### 18.12 Next protocol work
-
-The highest-value protocol work is now:
-
-```text
-1. derive APP_STATE +0x640/+0x6F2 for additional profiles instead of using fixed 0x17FA/0x0003
-2. identify additional FPGA selectors used for timebase, trigger, channel and analog/front-end configuration
-3. correlate those selectors with SMEC job IDs and key-like apply/commit sequences
-4. locally verify useful external command-map leads before promoting their names into the driver API
-5. characterize multi-bank and CH1/CH2 capture organization in the fully custom runtime
-6. validate calibration and sample interpretation after raw transport remains stable across profiles
-```
-
-The protocol is therefore no longer blocked on obtaining raw FPGA samples. The active problem is expanding a proven fixed-profile protocol into a general oscilloscope control and acquisition protocol.

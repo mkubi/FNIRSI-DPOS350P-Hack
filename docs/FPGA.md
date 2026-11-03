@@ -11,6 +11,31 @@
 - **DERIVED**: direct consequence of confirmed facts.
 - **OPEN**: unresolved question with no asserted semantic meaning.
 
+## Current authoritative status (2026-11-03)
+
+The document below intentionally preserves chronological reverse-engineering milestones. Statements phrased as current or future work inside older milestones are historical unless repeated in the latest authoritative sections.
+
+Use these sections as the current entry points:
+
+```text
+section 40  standalone custom FPGA acquisition baseline
+section 41  calibration-load prerequisite and FPGA/CSI boundary
+SYS_INFO.md canonical state/address map
+ACQUISITION.md current acquisition and calibrated-conversion model
+```
+
+Current confirmed boundary:
+
+```text
+FPGA/CSI raw transport              HW-CONFIRMED
+custom fixed-profile 0x1800 payload HW-CONFIRMED
+stock calibration persistence load  HW-CONFIRMED
+stock selector active coefficients  HW-CONFIRMED, 8/8
+stock calibrated CORE output        HW-CONFIRMED, 8/8 after load/selector
+```
+
+Older percentage-complete estimates are retained only as subjective historical snapshots. They are not current project metrics.
+
 ## Post-snapshot corrections and confirmed hardware results
 
 The following results were obtained after the 2026-10-23 snapshot and therefore supersede the relevant implementation assumptions later in the preserved document.
@@ -41,7 +66,7 @@ timeout-protected capture disable    PASS
 memory guards                        PASS
 ```
 
-No Custom App test has yet observed CSI completion or changed capture bytes.
+At this early milestone, no Custom App test had yet observed CSI completion or changed capture bytes. **SUPERSEDED:** section 40 HW-confirms CSI completion and a complete `0x1800`-byte payload in Custom App RAM.
 
 ## HW-confirmed FPGA_Start runtime boundary
 
@@ -493,13 +518,17 @@ R11 CSI
 
 The externally cross-checked MS5351M path on PE20/PE21 remains separate from the probable FPGA-side two-wire traffic near the unmarked 8-pin device.
 
-#### Consequence for standalone Custom App acquisition
+#### Historical consequence for standalone Custom App acquisition
+
+> **SUPERSEDED for the supported fixed-profile acquisition path.** This milestone predates the successful standalone capture in section 40 and the calibration result in section 41. Custom minimal `smec_init()` is sufficient for the confirmed fixed-profile raw capture. The later zero stock CORE output was caused by missing calibration persistence, not by a missing `0x64..0x6B` acquisition prerequisite.
 
 The previous isolated Custom App proved FPGA bus access, FPGA ID and local CSI setup, but did not complete acquisition. Runtime tracing now identifies a concrete missing subsystem: broader FPGA state initialization plus repeating `0x64..0x6B` asynchronous job/service transactions. The exact relationship of that protocol to acquisition remains under active test.
 
 This is a leading explanation for the failed acquisition experiment, but a causal dependency on CSI waveform emission still requires an active hardware test.
 
-#### Revised next step
+#### Historical next step at this milestone
+
+> Retained as experiment history. The referenced CSI smoke test and fixed-profile standalone capture were completed successfully in section 40.
 
 Do not immediately repeat the isolated CSI test. First aggregate complete stock service transactions into compact records containing:
 
@@ -529,7 +558,7 @@ Priority static region:
 0x4004A0B0
 ```
 
-A stock-assisted fallback is now also viable: let stock EXE2 perform the complete FPGA/service initialization while resident DPOSDBG supplies custom tracing and later custom functionality.
+At this milestone, a stock-assisted fallback was considered viable. **SUPERSEDED as a requirement:** section 40 confirms that stock EXE2 is not required for the supported fixed-profile raw capture.
 
 ## Independent hardware-variant cross-check (2026-10-25)
 
@@ -757,7 +786,7 @@ The external static/RAM-diff work reports these useful mappings:
 
 These mappings are valuable implementation leads but remain **EXTERNAL CROSS-CHECK** in this document until locally reproduced or independently verified against the local EXE2/hardware.
 
-#### Revised immediate experiment
+#### Historical proposed experiment at this milestone
 
 The next DPOSDBG transaction-level capture should answer a more neutral question than the earlier secure-service hypothesis:
 
@@ -1896,6 +1925,8 @@ GOWIN FPGA
 ---
 
 ## 23. Open questions
+
+> **HISTORICAL SNAPSHOT.** Many transport, bank-addressing, and readiness questions listed here were resolved by sections 33-40. Retained for searchability and reconstruction history. Consult sections 40-41 for current conclusions.
 - Re-check the exact local GOWIN FPGA package marking before applying package-specific JTAG pin numbers.
 - Locally verify externally reported FPGA command `0x02` charging-status bit and command `0x03` power-off behavior.
 - Track known DPOS350P hardware revisions by FPGA package and SPI-NOR JEDEC/vendor.
@@ -1921,11 +1952,15 @@ GOWIN FPGA
 
 ---
 
-## 24. Current next steps
+## 24. Historical next steps at this milestone
 
-The CPU-GPIO bulk-reader search is obsolete. Sections 32-36 confirm CSI transport. The next milestone is a polling-based, timeout-protected, single-bank Custom App. Static analysis should resume only when a hardware result exposes a specific ambiguity.
+> **SUPERSEDED:** the polling, timeout-protected single-bank Custom App and the full fixed-profile raw capture were completed successfully. See section 40.
 
-## 25. Planned staged hardware tests
+The CPU-GPIO bulk-reader search was already obsolete at this milestone. Sections 32-36 confirmed CSI transport. The planned polling-based, timeout-protected single-bank Custom App was later completed and extended by section 40.
+
+## 25. Historical staged hardware-test plan
+
+> **HISTORICAL PLAN.** Several stages below were later completed or narrowed. The current FPGA baseline and development direction are in sections 40-41.
 
 No hardware test is required merely to continue the current static analysis. Once the relevant code is reconstructed, use controlled staged tests.
 
@@ -2024,6 +2059,8 @@ Do not regress to these obsolete or disproven assumptions:
 - The custom driver's `GT911_INT_SETUP_MS = 100` is a conservative safety margin; hardware testing established approximately 50 ms as the point where touch coordinate reporting begins to work reliably enough to proceed.
 
 ### 29. Acquisition-control and post-ready update (2026-10-23)
+
+> **HISTORICAL MILESTONE.** Statements that waveform transport was unknown are superseded by sections 33-40. The processing findings and addresses remain useful.
 
 This section extends the previous snapshot without replacing its hardware, GT911, FPGA-start, SMEC-map, vertical, horizontal, generator, SysConfig, and staged-test material.
 
@@ -2139,7 +2176,9 @@ locate buffer fill/swap or FPGA transfer primitive
 confirm CH1/CH2 mapping and point format
 ```
 
-#### Updated RE estimate
+#### Historical subjective RE estimate
+
+> Subjective progress snapshot from this historical milestone; retained for chronology and not a current project metric.
 
 ```text
 FPGA startup and physical interface       85-90%
@@ -2157,6 +2196,8 @@ Full FPGA internals / replacement         25-30%
 
 
 ### 30. Waveform buffer and segmented acquisition pipeline update (2026-10-23)
+
+> **HISTORICAL MILESTONE.** The buffer-processing reconstruction remains useful. Open producer/transport questions are superseded by sections 33-40.
 
 This section extends section 29 and records the confirmed buffer-processing and segmented-acquisition findings. It does not replace the earlier hardware, startup, SMEC, timebase, vertical, generator, SysConfig, or GT911 sections.
 
@@ -2393,7 +2434,9 @@ exact distinction between 0x400408FC and 0x40040B20 modes
 confirmed physical CH1/CH2 assignment for channel indices 0/1
 ```
 
-#### Updated RE estimate
+#### Historical subjective RE estimate
+
+> Subjective progress snapshot from this historical milestone; retained for chronology and not a current project metric.
 
 ```text
 FPGA startup and physical interface       85-90%
@@ -2409,7 +2452,7 @@ Practical custom oscilloscope application about 57%
 Full FPGA internals / replacement         25-30%
 ```
 
-#### Next static-analysis targets
+#### Historical next static-analysis targets
 
 ```text
 0x4006338C  acquisition block/bank selector
@@ -2422,6 +2465,8 @@ Full FPGA internals / replacement         25-30%
 The immediate goal is to identify the raw 8-bit source-buffer producer and the exact low-level FPGA RAM/FIFO readout sequence.
 
 ### 31. Raw acquisition-bank memory snapshot (2026-10-23)
+
+> **HISTORICAL MILESTONE.** The bank layout remains valid. The then-open raw-buffer producer was later confirmed as R11 CSI in sections 33-40.
 
 This milestone extends section 30 with the first confirmed raw acquisition-memory layout and a tighter reconstruction of the FPGA bank/position protocol.
 
@@ -2622,7 +2667,9 @@ system helper invoked during acquisition setup
 
 The next static-analysis target is every direct or derived write into the raw-pool range, including copy/DMA helpers and pointers computed from `0x42DF76D4`.
 
-#### Updated RE estimate
+#### Historical subjective RE estimate
+
+> Subjective progress snapshot from this historical milestone; retained for chronology and not a current project metric.
 
 ```text
 FPGA startup and physical interface       85-90%
@@ -2639,6 +2686,8 @@ Full FPGA internals / replacement         25-30%
 ```
 
 ### 32. CSI waveform-transport cross-check (2026-10-23)
+
+> **HISTORICAL CROSS-CHECK.** This section introduced the correct CSI model from external evidence. Local confirmation and the completed custom capture follow in sections 33-40.
 
 This section records an independent external analysis supplied from commit `e55834596003e5b3feaae0fbfe1c1132a50666b4` in `fk0815/FNIRSI-DPOS350P-Hack` and reconciles it with the locally reconstructed EXE2 acquisition path. Earlier sections are intentionally retained as historical milestones; where they describe the waveform transport as unknown, this section supersedes that status.
 
@@ -2817,7 +2866,7 @@ waveform source should necessarily be found by searching PE_DATA reads
 
 The highest-priority working model is now CSI-based bulk capture with GPIO retained for the FPGA control plane.
 
-#### Updated next static-analysis steps
+#### Historical next static-analysis steps
 
 1. Disassemble `0x400660C8` locally and identify every access to CSI MMIO around `0x01CB4000`.
 2. Recover CSI pinmux, format, width, sync-polarity and capture-enable configuration.
@@ -2826,7 +2875,9 @@ The highest-priority working model is now CSI-based bulk capture with GPIO retai
 5. Determine whether each FPGA `0x15` bank/lane selection maps to a CSI frame, CSI buffer slot, or lane/interleave phase within a frame.
 6. Explain the `8000` active CSI quantity versus `8500` raw-slot stride without assigning meaning to the extra 500 bytes until proven.
 
-#### Updated RE estimate after CSI cross-check
+#### Historical subjective RE estimate after CSI cross-check
+
+> Subjective progress snapshot from this historical milestone; retained for chronology and not a current project metric.
 
 ```text
 FPGA startup and physical interface       90-95%
@@ -3044,7 +3095,7 @@ Earlier sections are retained as milestone history, but the following statements
 
 The missing work is no longer locating the transport mechanism. It is reconstructing the detailed CSI configuration and runtime lifecycle.
 
-##### Next static-analysis target
+##### Historical next static-analysis target
 
 Priority target:
 
@@ -3065,7 +3116,9 @@ explain whether the eight 0x2134 slots are hardware or software logical banks
 explain the 8000 versus 8500-byte relationship
 ```
 
-##### Updated RE estimate after local CSI confirmation
+##### Historical subjective RE estimate after local CSI confirmation
+
+> Subjective progress snapshot from this historical milestone; retained for chronology and not a current project metric.
 
 ```text
 FPGA startup and physical interface       about 95%
@@ -3298,7 +3351,7 @@ Because the CSI descriptor quantity is dynamically reconfigured, `8000` must not
 
 **STRONG INTERPRETATION:** `8500` is the allocated/logical lane stride, while the active capture quantity is variable and may leave space for trigger/ring offsets, edge processing or guard area. The 500-byte difference at startup remains unexplained and must not yet be assigned a fixed semantic meaning.
 
-### Next static-analysis target
+### Historical next static-analysis target
 
 The highest-value next step is now to trace the runtime destination argument passed to `0x40040638 -> 0x40066030`.
 
@@ -3320,7 +3373,9 @@ recover exact geometry semantics at +0x80/+0x84/+0x88
 confirm whether capture enable auto-clears after frame completion
 ```
 
-### Updated RE estimate
+### Historical subjective RE estimate
+
+> Subjective progress snapshot from this historical milestone; retained for chronology and not a current project metric.
 
 ```text
 FPGA startup and physical interface       about 95%
@@ -3479,7 +3534,7 @@ How many captures fill all slots?    Eight separate capture operations.
 Is there another capture variant?    Yes; a four-bank wrapper exists.
 ```
 
-### Next static-analysis targets before active HW acquisition testing
+### Historical next static-analysis targets before active HW testing
 
 The remaining high-value static questions are now narrower:
 
@@ -3492,7 +3547,9 @@ The remaining high-value static questions are now narrower:
 6. Determine the minimum initialization/configuration subset needed for a read-only custom acquisition test.
 ```
 
-### Updated RE estimate
+### Historical subjective RE estimate
+
+> Subjective progress snapshot from this historical milestone; retained for chronology and not a current project metric.
 
 ```text
 FPGA startup and physical interface       about 95%
@@ -3510,6 +3567,8 @@ Full FPGA internals / replacement         25-30%
 ```
 
 ## 36. Final pre-Custom-App static baseline (2026-10-23)
+
+> **HISTORICAL PRE-TEST BASELINE.** The planned single-bank smoke test was later completed and extended to the HW-confirmed custom fixed-profile capture in section 40.
 
 This section is authoritative for implementation. Earlier sections preserve the RE chronology; where they conflict, the latest `CONFIRMED` statement and this section take precedence.
 
@@ -3657,11 +3716,16 @@ Keep the original app recoverable through the boot manager.
 ### Decision
 
 ```text
+Historical decision at this milestone:
 GO: single-bank polling CSI smoke test with timeout.
 NO-GO: full oscilloscope clone in the first iteration.
+
+The GO test was later completed successfully; see section 40.
 ```
 
-### Current estimate
+### Historical subjective estimate
+
+> Subjective progress snapshot from this historical milestone; retained for chronology and not a current project metric.
 
 ```text
 FPGA startup/physical interface           about 95%
@@ -3968,6 +4032,8 @@ With this confirmation, the CSI destination-address chain is considered **closed
 
 ### 38. Final per-bank FPGA/PE capture sequencing before standalone smoke test (2026-10-25)
 
+> **HISTORICAL PRE-TEST MILESTONE.** The reconstructed sequence remains valuable. The future smoke-test wording is superseded by the successful section-40 result.
+
 This milestone closes the remaining statically required FPGA/PE-side sequencing around `0x40040638` before the next timeout-protected single-bank Custom App acquisition test. It supersedes the remaining vague references in sections 35-37 to generic bank selection, PE capture state, and unnamed pre/post-capture MMIO transitions.
 
 #### FPGA register 0x1F receives the per-capture bank index
@@ -4140,7 +4206,7 @@ The essential stock sequence around one logical bank is now:
 
 The stock firmware waits through its callback-backed software completion flag. The first standalone Custom App must instead poll the CSI hardware completion status with a finite timeout so that a missing FPGA stream cannot hang the device.
 
-#### Smoke-test readiness
+#### Historical smoke-test readiness
 
 **DERIVED:** No additional static target is currently mandatory before assembling the next single-bank acquisition smoke test. The critical address, ordering and polarity information required to reproduce the per-bank transport is now locally established.
 
@@ -4173,6 +4239,8 @@ A first success criterion remains intentionally modest: CSI completion must occu
 The principal remaining unknown is no longer the mechanics of the CSI transfer. It is whether the standalone Custom App has reproduced enough of the stock FPGA/acquisition initialization state to make the FPGA emit a valid stream. In particular, the role, if any, of the broader `0x64..0x6B` asynchronous FPGA job/service subsystem in acquisition remains unproven. A timeout or unchanged buffer in the next smoke test must therefore be treated as evidence of missing initialization/state, not as evidence against the now-confirmed CSI transport sequence.
 
 ### 39. HW-confirmed dynamic CSI capture window and RAM payload (2026-10-26)
+
+> **HISTORICAL STOCK-RUNTIME MILESTONE.** The hardware observations remain authoritative. The proposed next standalone test was subsequently completed in section 40.
 
 This milestone supersedes the remaining uncertainty in sections 36-38 about whether the stock FPGA actually emits a live waveform stream over the PE/CSI sample plane and whether CSI writes real acquisition bytes into the raw-bank RAM. The result is locally **HW-CONFIRMED** with resident DPOSDBG instrumentation while the stock EXE2 remained operational.
 
@@ -4417,9 +4485,9 @@ logical slot stride 0x2134 = 8500 bytes
 
 The stock callback path still establishes status bit 1 as the completion event that is acknowledged with `0x02`; the later `0x81` value is the state observed at the post-completion checkpoint after the stock callback/ack path has already participated.
 
-#### Revised immediate next step
+#### Historical next step completed later
 
-Proceed with the single-bank Custom App smoke test. Reproduce only the minimum confirmed state needed for one bank, poll completion with a finite timeout, invalidate the destination cache, and report buffer change/hash/prefix diagnostics. If this fails, treat the result as evidence of missing FPGA/SMEC/acquisition initialization rather than reopening the already HW-confirmed PE/CSI/RAM transport path.
+At this milestone, the next planned action was the single-bank Custom App smoke test later completed successfully in section 40. Reproduce only the minimum confirmed state needed for one bank, poll completion with a finite timeout, invalidate the destination cache, and report buffer change/hash/prefix diagnostics. If this fails, treat the result as evidence of missing FPGA/SMEC/acquisition initialization rather than reopening the already HW-confirmed PE/CSI/RAM transport path.
 
 ## 40. Standalone custom FPGA acquisition milestone (2026-10-29)
 
@@ -4665,8 +4733,9 @@ The transport and fixed-profile acquisition mechanics are no longer the principa
 3. identify and name additional FPGA commands
 4. correlate additional commands with SMEC jobs and key/magic apply sequences
 5. restore analog frontend/channel configuration
-6. validate sample interpretation, calibration and measurement correctness
-7. expand from one fixed capture profile to selectable operating modes
+6. integrate the HW-confirmed calibration persistence and selector prerequisite into calibrated sample conversion
+7. validate voltage/time interpretation and measurement correctness
+8. expand from one fixed capture profile to selectable operating modes
 ```
 
 The current baseline must continue to require all of:
@@ -4683,3 +4752,127 @@ CHANGED BYTES   0x00001800
 FIRST CHANGE    0x00000000
 LAST CHANGE     0x000017FF
 ```
+
+
+## 41. Calibration-load prerequisite and FPGA/CSI boundary (2026-11-03)
+
+This milestone records the hardware result that separates the already proven FPGA/CSI raw transport from the stock ARM-side calibrated conversion path. Detailed state addresses and serializer fields are maintained in `SYS_INFO.md`; the complete D0.4W11-D0.4W13 acquisition evidence is maintained in `ACQUISITION.md`.
+
+### 41.1 Confirmed architectural boundary
+
+The stock waveform path has two independent prerequisites that meet only at the calibrated conversion core:
+
+```text
+RAW TRANSPORT
+GOWIN FPGA
+    -> shared PE pins in CSI function 2
+    -> R11 CSI
+    -> raw uint8 banks at 0x42DF76D4 + bank * 0x2134
+
+CALIBRATION STATE
+persistent source from SYS_INFO+0x7E0
+    -> stock calibration load 0x400446B4
+    -> calibration matrix at 0x42E53A0C + 0x190...
+    -> stock selector
+    -> active per-lane coefficients at 0x42E53A0C + 0x10..+0x4C
+
+CONVERSION
+raw uint8 + active coefficients
+    -> 0x4004073C calibrated conversion core
+    -> uint16 waveform samples
+```
+
+The FPGA and CSI transport can therefore succeed while the unchanged stock conversion core still produces zero output if the calibration matrix and active coefficient sets have not been restored.
+
+### 41.2 D0.4W11 missing-calibration symptom
+
+Before the stock calibration persistence load, DPOSLAB observed:
+
+```text
+raw acquisition bytes present             YES
+source calibration pairs non-zero         0/8
+active coefficient pairs non-zero         0/8
+stock calibrated CORE outputs non-zero    0/8
+```
+
+This eliminated the earlier interpretation that zero converted output necessarily indicated a failed FPGA stream or failed CSI DMA transaction.
+
+### 41.3 D0.4W12 persistence-load result
+
+D0.4W12 inserted only the normal stock read/decode wrapper `0x400446B4`. It did not execute calibration save, FactoryCheck, or factory calibration generation.
+
+Observed hardware state:
+
+```text
+persistence source address     0x001FB000
+serializer cursor              0x00000000 -> 0x000014C8
+serializer mode                0x00000000 -> 0x00000001
+matrix sample 0                0x00000000 -> 0x40200000
+matrix sample 1                0x00000000 -> 0x40200000
+```
+
+The final cursor `0x14C8` matches the statically reconstructed active calibration serialization size. The observed value `0x40200000` is bit-compatible with IEEE-754 `2.5f`, but this does not prove that every calibration entry is a floating-point value.
+
+### 41.4 D0.4W13 hardware-confirmed end-to-end result
+
+D0.4W13 retained the same raw acquisition, selector, and stock conversion core and added a strict end-to-end verdict.
+
+```text
+source coefficient pairs non-zero         8/8
+active pairs before selector               0/8
+active pairs after selector                8/8
+active pairs changed by selector           8/8
+CORE outputs non-zero before selector      0/8
+CORE outputs non-zero after selector       8/8
+W13 verdict                                0x50415353 ("PASS")
+```
+
+**HW-CONFIRMED:** the earlier zero stock CORE output was caused by missing ARM-side calibration persistence state, not by failure of the GOWIN FPGA, PE/CSI sample plane, R11 CSI peripheral, or raw-bank transport. After the stock load restored the matrix, the stock selector populated all eight active coefficient pairs and the unchanged conversion core produced non-zero output for all eight lanes.
+
+### 41.5 Consequences for FPGA conclusions
+
+The following FPGA/CSI conclusions remain unchanged:
+
+```text
+FPGA control plane operational                   YES
+FPGA emits the supported fixed-profile stream    YES
+R11 CSI completion observed                      YES
+full custom raw payload transferred              YES, 0x1800 bytes
+stock EXE2 required for fixed raw transport       NO
+```
+
+D0.4W13 adds a downstream requirement rather than changing the transport result:
+
+```text
+stock-compatible calibrated conversion requires:
+    valid raw payload
+    + loaded calibration matrix
+    + stock selector or equivalent coefficient selection
+    + calibrated conversion core
+```
+
+Calibration persistence must therefore not be described as an FPGA initialization requirement. It is an ARM-side sample-interpretation/conversion prerequisite. The custom raw acquisition oracle remains valid without it; producing stock-compatible calibrated waveform values does not.
+
+### 41.6 Superseded interpretations
+
+The following statements are superseded:
+
+```text
+zero stock CORE output means the FPGA returned no useful data
+zero converted samples imply CSI transport failure
+another FPGA/SC3 initialization stage must be missing because CORE is zero
+```
+
+The confirmed distinction is now:
+
+```text
+transport failure:
+    no valid CSI completion and/or no valid raw payload
+
+calibration-state failure:
+    valid raw payload
+    but missing source/active coefficients
+    and zero calibrated CORE output
+```
+
+Further work on calibrated waveform output should follow `ACQUISITION.md`. FPGA-specific work should continue to use CSI completion and raw-buffer payload integrity as the transport acceptance oracle.
