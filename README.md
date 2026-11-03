@@ -162,6 +162,15 @@ for function disassembly, fixed-range inspection, and cross-referencing the
 recovered stock state layout. `arm-none-eabi-objdump` remains useful as an
 independent secondary cross-check.
 
+## Quick start: replace the stock boot logo
+ 
+```text
+python3 tools/dpos_tool.py replace original.iso your_logo.png custom.iso
+python3 tools/dpos_tool.py verify custom.iso
+```
+
+Copy the resulting update container to the oscilloscope USB-storage root, safely eject the device, and reboot. Keep the original container and a verified flash backup before performing update experiments.
+
 ## Update-container tooling
 
 The repository also retains tooling for analyzing and rebuilding the stock update container. Refer to `docs/iso_format.md` and `docs/checksum.md` before using it.
